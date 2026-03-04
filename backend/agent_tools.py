@@ -12,6 +12,17 @@ class WriteFileSchema(BaseModel):
     file_path: str = Field(description="The relative path to the file to create or overwrite, e.g. 'src/App.tsx'")
     content: str = Field(description="The complete code/text content to write to the file.")
 
+class EditFileLinesSchema(BaseModel):
+    file_path: str = Field(description="The relative path to the file to edit, e.g. 'src/App.tsx'")
+    start_line: int = Field(description="The starting line number (1-based, inclusive) of the range to replace.")
+    end_line: int = Field(description="The ending line number (1-based, inclusive) of the range to replace.")
+    new_content: str = Field(description="The new content to replace the specified line range with.")
+
+class InsertAtLineSchema(BaseModel):
+    file_path: str = Field(description="The relative path to the file to edit, e.g. 'src/App.tsx'")
+    line_number: int = Field(description="The line number (1-based) where the new content will be inserted. The new content will appear BEFORE this line.")
+    content: str = Field(description="The content to insert at the specified line number.")
+
 class TerminalExecutionTool(BaseTool):
     name: str = "Execute Terminal Command"
     description: str = "Executes a shell command in the specified workspace directory and returns the stdout and stderr."
@@ -267,3 +278,111 @@ class ReplaceInFileTool(BaseTool):
         except Exception as e:
             return f"[FAILED] Error editing file: {str(e)}"
 
+
+class EditFileLinesTool(BaseTool):
+    name: str = "Edit File Lines"
+    description: str = "Replaces a specific range of lines in a file with new content. Use this for surgical edits. You MUST use Read File first to get the correct line numbers."
+    args_schema: type[BaseModel] = EditFileLinesSchema
+    workspace_path: str = "./workspace"
+    require_approval: bool = False
+    approval_callback: Any = None
+
+    def __init__(self, workspace_path: str, **kwargs):
+        super().__init__(**kwargs)
+        self.workspace_path = workspace_path
+
+    def _run(self, file_path: str, start_line: int, end_line: int, new_content: str) -> str:
+        """Edit a range of lines in a file."""
+        if self.require_approval and self.approval_callback:
+            try:
+                msg = f"EDIT_FILE_LINES: {file_path}\nRANGE: {start_line}-{end_line}\n\nNEW CONTENT PREVIEW:\n{new_content[:100]}..."
+                approved, feedback = self.approval_callback(msg)
+                if not approved:
+                    return f"[REJECTED] {feedback}"
+            except InterruptedError:
+                return "[SYSTEM] Aborted."
+
+        try:
+            target_path = os.path.abspath(os.path.join(self.workspace_path, file_path))
+            if not target_path.startswith(os.path.abspath(self.workspace_path)):
+                return "[DENIED] Outside workspace."
+            
+            if not os.path.exists(target_path):
+                return "[FAILED] Not found."
+
+            with open(target_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+
+            # start_line and end_line are 1-based inclusive
+            idx_start = start_line - 1
+            idx_end = end_line # end is inclusive in terms of line number, which means exclusion idx is end_line
+
+            if idx_start < 0 or idx_start >= len(lines) or idx_end < idx_start:
+                 return f"[FAILED] Invalid range {start_line}-{end_line} for file with {len(lines)} lines."
+
+            new_lines = new_content.splitlines(keepends=True)
+            # Ensure new_content ends with newline if the last line replaced had one
+            if new_content and not new_content.endswith('\n'):
+                new_lines[-1] = new_lines[-1] + '\n'
+
+            lines[idx_start:idx_end] = new_lines
+
+            with open(target_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+
+            return f"[SUCCESS] Edited lines {start_line}-{end_line} of {file_path}."
+        except Exception as e:
+            return f"[FAILED] {str(e)}"
+
+class InsertAtLineTool(BaseTool):
+    name: str = "Insert At Line"
+    description: str = "Inserts content at a specific line number (before the existing line). Use this to add code without affecting existing lines."
+    args_schema: type[BaseModel] = InsertAtLineSchema
+    workspace_path: str = "./workspace"
+    require_approval: bool = False
+    approval_callback: Any = None
+
+    def __init__(self, workspace_path: str, **kwargs):
+        super().__init__(**kwargs)
+        self.workspace_path = workspace_path
+
+    def _run(self, file_path: str, line_number: int, content: str) -> str:
+        """Insert content at a specific line number."""
+        if self.require_approval and self.approval_callback:
+            try:
+                msg = f"INSERT_AT_LINE: {file_path}\nLINE: {line_number}\n\nCONTENT PREVIEW:\n{content[:100]}..."
+                approved, feedback = self.approval_callback(msg)
+                if not approved:
+                    return f"[REJECTED] {feedback}"
+            except InterruptedError:
+                return "[SYSTEM] Aborted."
+
+        try:
+            target_path = os.path.abspath(os.path.join(self.workspace_path, file_path))
+            if not target_path.startswith(os.path.abspath(self.workspace_path)):
+                return "[DENIED] Outside workspace."
+            
+            if not os.path.exists(target_path):
+                return "[FAILED] Not found."
+
+            with open(target_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+
+            idx = line_number - 1
+            if idx < 0: idx = 0
+            if idx > len(lines): idx = len(lines)
+
+            new_lines = content.splitlines(keepends=True)
+            # Ensure content ends with newline
+            if content and not content.endswith('\n'):
+                new_lines[-1] = new_lines[-1] + '\n'
+
+            for i, line in enumerate(new_lines):
+                lines.insert(idx + i, line)
+
+            with open(target_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+
+            return f"[SUCCESS] Inserted content at line {line_number} of {file_path}."
+        except Exception as e:
+            return f"[FAILED] {str(e)}"
