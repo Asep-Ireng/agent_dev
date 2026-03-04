@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+.venv/
+env/
+venv/
+
+# Next.js
+.next/
+out/
+
+# Environment Variables
+.env
+.env.local
+.env.*.local
+
+# Project Specific
+workspace/
+backend/workspace/
+frontend/workspace/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
