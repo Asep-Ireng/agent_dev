@@ -51,6 +51,7 @@ export default function Home() {
   const [devChatInput, setDevChatInput] = useState("");
   const [devChatLoading, setDevChatLoading] = useState(false);
   const [devChatFiles, setDevChatFiles] = useState<File[]>([]);
+  const [devChatMode, setDevChatMode] = useState<"ask" | "apply">("ask");
   const logsEndRef = useRef<HTMLDivElement>(null);
   const devChatEndRef = useRef<HTMLDivElement>(null);
 
@@ -251,37 +252,119 @@ export default function Home() {
     setDevChatInput("");
     setDevChatFiles([]);
     
+    const modeLabel = devChatMode === "apply" ? "🔧" : "💬";
     const displayText = filesToSend.length > 0 
-      ? `${userMessage} [📎 ${filesToSend.length} file${filesToSend.length > 1 ? 's' : ''}]`
-      : userMessage;
+      ? `${modeLabel} ${userMessage} [📎 ${filesToSend.length} file${filesToSend.length > 1 ? 's' : ''}]`
+      : `${modeLabel} ${userMessage}`;
     setDevChatMessages(prev => [...prev, { role: "user", content: displayText }]);
     setDevChatLoading(true);
     
-    try {
-      const formData = new FormData();
-      formData.append("message", userMessage);
-      formData.append("spec", spec);
-      formData.append("workspace_path", workspacePath);
-      formData.append("history", JSON.stringify(devChatMessages));
-      formData.append("provider", provider);
-      formData.append("model", model);
-      formData.append("api_key", apiKey);
-      filesToSend.forEach(file => formData.append("files", file));
-      
-      const response = await fetch("http://localhost:8000/api/dev-chat", {
-        method: "POST",
-        body: formData
-      });
-      
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      
-      const data = await response.json();
-      setDevChatMessages(prev => [...prev, { role: "assistant", content: data.reply }]);
-    } catch (err) {
-      console.error("Dev chat error:", err);
-      setDevChatMessages(prev => [...prev, { role: "assistant", content: "Sorry, something went wrong. Check that the backend is running." }]);
-    } finally {
-      setDevChatLoading(false);
+    if (devChatMode === "apply") {
+      // Apply mode — connect to SSE iterate endpoint
+      try {
+        setDeveloperLoading(true);
+        setActionLogs([]);
+        
+        const queryParams = new URLSearchParams({
+          task: userMessage,
+          spec: spec,
+          workspace_path: workspacePath,
+          provider: provider,
+          model: model,
+          api_key: apiKey,
+          require_approval: requireApproval ? "true" : "false"
+        });
+        
+        const eventSource = new EventSource(`http://localhost:8000/api/dev-iterate?${queryParams.toString()}`);
+        
+        const addLog = (entry: LogEntry) => setActionLogs(prev => [...prev, entry]);
+        
+        const handleTypedEvent = (eventType: string) => (event: MessageEvent) => {
+          try {
+            const data = JSON.parse(event.data);
+            switch (eventType) {
+              case "thought": addLog({ type: "thought", text: data.text }); break;
+              case "tool_call": addLog({ type: "tool_call", tool: data.tool, input: data.input }); break;
+              case "tool_input": addLog({ type: "tool_input", input: data.input }); break;
+              case "tool_result": addLog({ type: "tool_result", ...data }); break;
+              case "final_answer": addLog({ type: "final_answer", text: data.text }); break;
+              case "system": addLog({ type: "system", text: data.text, level: data.level }); break;
+              case "log": addLog({ type: "log", text: data.text }); break;
+              case "cmd_start": addLog({ type: "cmd_start", cwd: data.cwd, cmd: data.cmd }); break;
+              case "cmd_output": addLog({ type: "cmd_output", stream: data.stream, line: data.line }); break;
+              case "cmd_end": addLog({ type: "cmd_end", exit_code: data.exit_code, success: data.success }); break;
+            }
+          } catch (e) {
+            console.error(`Failed to parse ${eventType} event:`, e);
+          }
+        };
+        
+        ["thought", "tool_call", "tool_input", "tool_result", "final_answer", "system", "log", "cmd_start", "cmd_output", "cmd_end"].forEach(evt => {
+          eventSource.addEventListener(evt, handleTypedEvent(evt));
+        });
+        
+        eventSource.addEventListener("action_required", (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            setPendingCommand(data.command);
+          } catch (e) { console.error(e); }
+        });
+        
+        eventSource.addEventListener("result", (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.text) {
+              setDevChatMessages(prev => [...prev, { role: "assistant", content: data.text }]);
+            }
+          } catch (e) { console.error(e); }
+        });
+        
+        eventSource.addEventListener("done", () => {
+          eventSource.close();
+          setDeveloperLoading(false);
+          setDevChatLoading(false);
+        });
+        
+        eventSource.onerror = () => {
+          addLog({ type: "system", text: "Iteration connection closed or errored.", level: "error" });
+          eventSource.close();
+          setDeveloperLoading(false);
+          setDevChatLoading(false);
+        };
+      } catch (err) {
+        console.error("Dev iterate error:", err);
+        setDevChatMessages(prev => [...prev, { role: "assistant", content: "Failed to start iteration. Check the backend." }]);
+        setDeveloperLoading(false);
+        setDevChatLoading(false);
+      }
+    } else {
+      // Ask mode — normal chat
+      try {
+        const formData = new FormData();
+        formData.append("message", userMessage);
+        formData.append("spec", spec);
+        formData.append("workspace_path", workspacePath);
+        formData.append("history", JSON.stringify(devChatMessages));
+        formData.append("provider", provider);
+        formData.append("model", model);
+        formData.append("api_key", apiKey);
+        filesToSend.forEach(file => formData.append("files", file));
+        
+        const response = await fetch("http://localhost:8000/api/dev-chat", {
+          method: "POST",
+          body: formData
+        });
+        
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        
+        const data = await response.json();
+        setDevChatMessages(prev => [...prev, { role: "assistant", content: data.reply }]);
+      } catch (err) {
+        console.error("Dev chat error:", err);
+        setDevChatMessages(prev => [...prev, { role: "assistant", content: "Sorry, something went wrong. Check that the backend is running." }]);
+      } finally {
+        setDevChatLoading(false);
+      }
     }
   };
 
@@ -844,7 +927,28 @@ export default function Home() {
                     <Code2 className="w-4 h-4 text-white" />
                   </div>
                   <h3 className="text-xl font-medium text-[#EAEFEF]">Chat with Developer</h3>
-                  <span className="text-xs text-[#EAEFEF]/40">Ask about design decisions, code structure, or improvements</span>
+                  <div className="ml-auto flex gap-1 bg-black/30 rounded-lg p-0.5">
+                    <button
+                      onClick={() => setDevChatMode("ask")}
+                      className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${
+                        devChatMode === "ask"
+                          ? "bg-[#395370]/60 text-[#EAEFEF] shadow-sm"
+                          : "text-[#EAEFEF]/40 hover:text-[#EAEFEF]/70"
+                      }`}
+                    >
+                      💬 Ask
+                    </button>
+                    <button
+                      onClick={() => setDevChatMode("apply")}
+                      className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${
+                        devChatMode === "apply"
+                          ? "bg-[#FF9B51]/40 text-[#EAEFEF] shadow-sm"
+                          : "text-[#EAEFEF]/40 hover:text-[#EAEFEF]/70"
+                      }`}
+                    >
+                      🔧 Apply
+                    </button>
+                  </div>
                 </div>
 
                 <div className="bg-black/20 border border-white/10 rounded-2xl shadow-xl overflow-hidden flex flex-col max-h-[500px]">
@@ -852,7 +956,9 @@ export default function Home() {
                   <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar min-h-[120px]">
                     {devChatMessages.length === 0 && (
                       <div className="text-center text-[#EAEFEF]/30 text-sm py-8">
-                        Ask the developer anything about the project they just built.
+                        {devChatMode === "apply"
+                          ? "Describe a change and the agent will apply it to the codebase."
+                          : "Ask the developer anything about the project they just built."}
                       </div>
                     )}
                     {devChatMessages.map((msg, idx) => (

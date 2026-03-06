@@ -525,6 +525,215 @@ async def generate_code_stream(
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+@app.get("/api/dev-iterate")
+async def dev_iterate(
+    task: str = "",
+    spec: str = "",
+    workspace_path: str = "./workspace",
+    provider: str = "Google (Gemini)",
+    model: str = "gemini-2.5-flash-preview-05-20",
+    api_key: str = "",
+    require_approval: str = "false"
+):
+    """SSE endpoint for iterative development — agent executes changes based on user instructions."""
+    set_keys(api_key, provider)
+    abort_event.clear()
+    
+    q = queue.Queue()
+
+    # Reuse the same StreamCatcher for parsing CrewAI ReAct output
+    class StreamCatcher:
+        def __init__(self):
+            self.buffer = ""
+            
+        def write(self, text):
+            if not text or not text.strip():
+                return
+            
+            clean = _strip_ansi(text)
+            if not clean:
+                return
+            
+            if clean.startswith("Agent:") or clean.startswith("## Agent:"):
+                _emit(q, "system", {"text": clean, "level": "info"})
+                return
+            if clean.startswith("Task:") or clean.startswith("## Task:"):
+                _emit(q, "system", {"text": clean, "level": "info"})
+                return
+            if clean.startswith("Thought:") or clean.startswith("> Thinking:"):
+                thought_text = clean.split(":", 1)[1].strip() if ":" in clean else clean
+                _emit(q, "thought", {"text": thought_text})
+                return
+            if clean.startswith("Action:"):
+                tool_name = clean.split(":", 1)[1].strip() if ":" in clean else clean
+                _emit(q, "tool_call", {"tool": tool_name, "input": ""})
+                return
+            if clean.startswith("Action Input:"):
+                action_input = clean.split(":", 1)[1].strip() if ":" in clean else clean
+                _emit(q, "tool_input", {"input": action_input})
+                return
+            if clean.startswith("Observation:") or clean.startswith("Tool Result:"):
+                result_text = clean.split(":", 1)[1].strip() if ":" in clean else clean
+                
+                cwd = ""
+                cmd = ""
+                stdout = ""
+                stderr = ""
+                exit_code = None
+                success = True
+                
+                if "[CWD]" in result_text:
+                    parts = result_text
+                    cwd_match = _re.search(r'\[CWD\]\s*(.+?)(?:\n|\[CMD\]|$)', parts)
+                    cmd_match = _re.search(r'\[CMD\]\s*(.+?)(?:\n|\[STDOUT\]|\[STDERR\]|\[EXIT\]|$)', parts)
+                    stdout_match = _re.search(r'\[STDOUT\]\s*\n?(.*?)(?:\[STDERR\]|\[EXIT\]|$)', parts, _re.DOTALL)
+                    stderr_match = _re.search(r'\[STDERR\]\s*\n?(.*?)(?:\[EXIT\]|$)', parts, _re.DOTALL)
+                    exit_match = _re.search(r'\[EXIT\]\s*(\d+)', parts)
+                    
+                    if cwd_match: cwd = cwd_match.group(1).strip()
+                    if cmd_match: cmd = cmd_match.group(1).strip()
+                    if stdout_match: stdout = stdout_match.group(1).strip()
+                    if stderr_match: stderr = stderr_match.group(1).strip()
+                    if exit_match: exit_code = int(exit_match.group(1))
+                    
+                    success = "[SUCCESS]" in result_text or exit_code == 0
+                    
+                    _emit(q, "tool_result", {
+                        "tool": "terminal",
+                        "cwd": cwd, "cmd": cmd,
+                        "stdout": stdout, "stderr": stderr,
+                        "exit_code": exit_code, "success": success,
+                        "raw": result_text[:500]
+                    })
+                else:
+                    _emit(q, "tool_result", {
+                        "tool": "file_op",
+                        "cwd": "", "cmd": "",
+                        "stdout": result_text[:500], "stderr": "",
+                        "exit_code": 0, "success": "[SUCCESS]" in result_text,
+                        "raw": result_text[:500]
+                    })
+                return
+            
+            if clean.startswith("Final Answer:"):
+                answer_text = clean.split(":", 1)[1].strip() if ":" in clean else clean
+                _emit(q, "final_answer", {"text": answer_text})
+                return
+            
+            _emit(q, "log", {"text": clean})
+                
+        def flush(self):
+            pass
+
+    def run_iterate():
+        killed = False
+        old_stdout = sys.stdout
+        sys.stdout = StreamCatcher()
+        try:
+            _emit(q, "system", {"text": "Initializing Iteration Agent...", "level": "info"})
+            
+            def approval_callback(command: str) -> tuple[bool, str | None]:
+                q.put(f"event: action_required\ndata: {_json.dumps({'command': command})}\n\n")
+                approval_state["event"].clear()
+                while not approval_state["event"].is_set() and not abort_event.is_set():
+                    approval_state["event"].wait(0.5)
+                if abort_event.is_set():
+                    raise InterruptedError("User triggered manual stop while waiting for approval.")
+                return (approval_state["approved"], approval_state.get("feedback"))
+
+            def stream_callback(event_type, data):
+                if event_type == "cmd_start":
+                    _emit(q, "cmd_start", data)
+                elif event_type == "cmd_end":
+                    _emit(q, "cmd_end", data)
+                elif event_type in ("stdout", "stderr"):
+                    _emit(q, "cmd_output", {"stream": event_type, "line": data})
+            
+            terminal_tool = TerminalExecutionTool(
+                workspace_path=workspace_path,
+                require_approval=(require_approval.lower() == "true"),
+                approval_callback=approval_callback,
+                stream_callback=stream_callback
+            )
+            write_file_tool = WriteFileTool(
+                workspace_path=workspace_path,
+                require_approval=(require_approval.lower() == "true"),
+                approval_callback=approval_callback
+            )
+            read_file_tool = ReadFileTool(workspace_path=workspace_path)
+            replace_in_file_tool = ReplaceInFileTool(
+                workspace_path=workspace_path,
+                require_approval=(require_approval.lower() == "true"),
+                approval_callback=approval_callback
+            )
+            edit_file_lines_tool = EditFileLinesTool(
+                workspace_path=workspace_path,
+                require_approval=(require_approval.lower() == "true"),
+                approval_callback=approval_callback
+            )
+            insert_at_line_tool = InsertAtLineTool(
+                workspace_path=workspace_path,
+                require_approval=(require_approval.lower() == "true"),
+                approval_callback=approval_callback
+            )
+            
+            def check_abort(*args, **kwargs):
+                if abort_event.is_set():
+                    _emit(q, "system", {"text": "Abort signal received. Terminating...", "level": "warn"})
+                    raise InterruptedError("User triggered manual stop.")
+
+            iterator = Agent(
+                role='Iterative Developer',
+                goal='Apply the requested changes to the existing project.',
+                backstory="You are iterating on an existing project. The project was built according to a spec and already exists in the workspace. Your job is to make the specific changes the user requested. ALWAYS use Read File first to understand the current state of relevant files before making edits. For targeted edits, use Edit File Lines (to replace a specific line range) or Insert At Line (to add code at a specific position). Use Replace In File if you have a unique text snippet to match. Use Write File only for creating new files. Use the terminal for installing dependencies, running builds, or testing. Never rewrite a whole file just to change a few lines.",
+                verbose=True,
+                allow_delegation=False,
+                llm=get_llm(model, provider),
+                tools=[terminal_tool, write_file_tool, read_file_tool, replace_in_file_tool, edit_file_lines_tool, insert_at_line_tool],
+                step_callback=check_abort
+            )
+            
+            iterate_task = Task(
+                description=f'The user has requested the following change to the existing project:\n\n{task}\n\nFor context, here is the project spec:\n\n{spec}\n\nRead the relevant files, make the changes, and verify they work.',
+                expected_output='A summary of what was changed and any relevant details.',
+                agent=iterator
+            )
+            
+            crew = Crew(agents=[iterator], tasks=[iterate_task])
+            crew_result = crew.kickoff()
+            
+            raw_result = crew_result.raw if hasattr(crew_result, 'raw') else str(crew_result)
+            if raw_result and raw_result.strip():
+                _emit(q, "result", {"text": raw_result})
+        except InterruptedError as e:
+            killed = True
+            _emit(q, "system", {"text": f"Process stopped: {str(e)}", "level": "warn"})
+        except Exception as e:
+            _emit(q, "system", {"text": f"Iteration failure: {str(e)}", "level": "error"})
+        finally:
+            sys.stdout = old_stdout
+            q.put(f"event: done\ndata: {_json.dumps({'killed': killed})}\n\n")
+
+    threading.Thread(target=run_iterate).start()
+
+    async def event_generator():
+        while True:
+            try:
+                item = await asyncio.to_thread(q.get, timeout=0.1)
+                if item:
+                    yield item
+                if "event: done" in item:
+                    break
+                if abort_event.is_set():
+                     _emit(q, "system", {"text": "Stream closed.", "level": "warn"})
+                     yield f"event: done\ndata: {_json.dumps({'killed': True})}\n\n"
+                     break
+            except queue.Empty:
+                yield ": keepalive\n\n"
+                await asyncio.sleep(0.5)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
 @app.post("/api/develop/stop")
 async def stop_development():
     """Endpoint triggered by the Stop button in the frontend Kill Switch"""
