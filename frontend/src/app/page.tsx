@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Sparkles, Code2, Settings2, Box, Loader2, Paperclip, Send, TerminalSquare, AlertTriangle, XCircle, CheckCircle, ChevronDown, ChevronRight, FileCode2, Brain, Terminal } from "lucide-react";
+import { Sparkles, Code2, Settings2, Box, Loader2, Paperclip, Send, TerminalSquare, AlertTriangle, XCircle, CheckCircle, ChevronDown, ChevronRight, ChevronUp, FileCode2, Brain, Terminal } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
 type LogEntry =
@@ -52,6 +52,7 @@ export default function Home() {
   const [devChatLoading, setDevChatLoading] = useState(false);
   const [devChatFiles, setDevChatFiles] = useState<File[]>([]);
   const [devChatMode, setDevChatMode] = useState<"ask" | "apply">("ask");
+  const [pendingApplyTask, setPendingApplyTask] = useState<string | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const devChatEndRef = useRef<HTMLDivElement>(null);
 
@@ -95,7 +96,7 @@ export default function Home() {
       if (!res.ok) throw new Error(data.detail || "API failed");
       
       setSpec(data.spec);
-      setChatHistory(prev => [...prev, { role: "agent", content: "I've updated the spec based on your feedback!" }]);
+      setChatHistory(prev => [...prev, { role: "agent", content: data.summary || "Specification updated." }]);
       setAttachedFiles([]);
       setSpecTab("preview");
       
@@ -221,10 +222,23 @@ export default function Home() {
     eventSource.addEventListener("done", (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.killed) {
-          addLog({ type: "system", text: "Agent stopped by user.", level: "warn" });
-        } else {
-          addLog({ type: "system", text: "Development completed successfully!", level: "info" });
+        const status = data.status || (data.killed ? "killed" : data.error ? "failed" : "success");
+        const summary = data.status_summary ? ` — ${data.status_summary}` : "";
+        
+        switch (status) {
+          case "killed":
+            addLog({ type: "system", text: "Agent stopped by user.", level: "warn" });
+            break;
+          case "failed":
+            addLog({ type: "system", text: `Development failed.${summary}`, level: "error" });
+            break;
+          case "partial":
+            addLog({ type: "system", text: `Development partially completed — some issues occurred.${summary}`, level: "warn" });
+            break;
+          case "success":
+          default:
+            addLog({ type: "system", text: `Development completed successfully!${summary}`, level: "info" });
+            break;
         }
       } catch {
         addLog({ type: "system", text: "Development process finished.", level: "info" });
@@ -260,81 +274,34 @@ export default function Home() {
     setDevChatLoading(true);
     
     if (devChatMode === "apply") {
-      // Apply mode — connect to SSE iterate endpoint
+      // Apply mode — Step 1: Get a plan from litellm first
       try {
-        setDeveloperLoading(true);
-        setActionLogs([]);
+        const formData = new FormData();
+        formData.append("message", `The user wants you to make the following change:\n\n"${userMessage}"\n\nCreate a brief, specific plan of what you will do. List the files you will read, modify, or create, and describe the changes concisely. Do NOT execute anything yet — just describe the plan.`);
+        formData.append("spec", spec);
+        formData.append("workspace_path", workspacePath);
+        formData.append("history", JSON.stringify(devChatMessages));
+        formData.append("provider", provider);
+        formData.append("model", model);
+        formData.append("api_key", apiKey);
+        filesToSend.forEach(file => formData.append("files", file));
         
-        const queryParams = new URLSearchParams({
-          task: userMessage,
-          spec: spec,
-          workspace_path: workspacePath,
-          provider: provider,
-          model: model,
-          api_key: apiKey,
-          require_approval: requireApproval ? "true" : "false"
+        const response = await fetch("http://localhost:8000/api/dev-chat", {
+          method: "POST",
+          body: formData
         });
         
-        const eventSource = new EventSource(`http://localhost:8000/api/dev-iterate?${queryParams.toString()}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         
-        const addLog = (entry: LogEntry) => setActionLogs(prev => [...prev, entry]);
-        
-        const handleTypedEvent = (eventType: string) => (event: MessageEvent) => {
-          try {
-            const data = JSON.parse(event.data);
-            switch (eventType) {
-              case "thought": addLog({ type: "thought", text: data.text }); break;
-              case "tool_call": addLog({ type: "tool_call", tool: data.tool, input: data.input }); break;
-              case "tool_input": addLog({ type: "tool_input", input: data.input }); break;
-              case "tool_result": addLog({ type: "tool_result", ...data }); break;
-              case "final_answer": addLog({ type: "final_answer", text: data.text }); break;
-              case "system": addLog({ type: "system", text: data.text, level: data.level }); break;
-              case "log": addLog({ type: "log", text: data.text }); break;
-              case "cmd_start": addLog({ type: "cmd_start", cwd: data.cwd, cmd: data.cmd }); break;
-              case "cmd_output": addLog({ type: "cmd_output", stream: data.stream, line: data.line }); break;
-              case "cmd_end": addLog({ type: "cmd_end", exit_code: data.exit_code, success: data.success }); break;
-            }
-          } catch (e) {
-            console.error(`Failed to parse ${eventType} event:`, e);
-          }
-        };
-        
-        ["thought", "tool_call", "tool_input", "tool_result", "final_answer", "system", "log", "cmd_start", "cmd_output", "cmd_end"].forEach(evt => {
-          eventSource.addEventListener(evt, handleTypedEvent(evt));
-        });
-        
-        eventSource.addEventListener("action_required", (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            setPendingCommand(data.command);
-          } catch (e) { console.error(e); }
-        });
-        
-        eventSource.addEventListener("result", (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            if (data.text) {
-              setDevChatMessages(prev => [...prev, { role: "assistant", content: data.text }]);
-            }
-          } catch (e) { console.error(e); }
-        });
-        
-        eventSource.addEventListener("done", () => {
-          eventSource.close();
-          setDeveloperLoading(false);
-          setDevChatLoading(false);
-        });
-        
-        eventSource.onerror = () => {
-          addLog({ type: "system", text: "Iteration connection closed or errored.", level: "error" });
-          eventSource.close();
-          setDeveloperLoading(false);
-          setDevChatLoading(false);
-        };
+        const data = await response.json();
+        // Store the plan and the original task, show with a Proceed button
+        setPendingApplyTask(userMessage);
+        setDevChatMessages(prev => [...prev, { role: "assistant", content: `**📋 Proposed Plan:**\n\n${data.reply}\n\n---\n_Click **Proceed** below to execute this plan, or type a follow-up to refine it._` }]);
       } catch (err) {
-        console.error("Dev iterate error:", err);
-        setDevChatMessages(prev => [...prev, { role: "assistant", content: "Failed to start iteration. Check the backend." }]);
-        setDeveloperLoading(false);
+        console.error("Dev chat plan error:", err);
+        setDevChatMessages(prev => [...prev, { role: "assistant", content: "Failed to generate a plan. Check the backend." }]);
+        setPendingApplyTask(null);
+      } finally {
         setDevChatLoading(false);
       }
     } else {
@@ -366,6 +333,91 @@ export default function Home() {
         setDevChatLoading(false);
       }
     }
+  };
+
+  const handleApplyProceed = () => {
+    if (!pendingApplyTask) return;
+    
+    const taskToExecute = pendingApplyTask;
+    setPendingApplyTask(null);
+    setDevChatMessages(prev => [...prev, { role: "user", content: "▶ Proceeding with the plan..." }]);
+    setDeveloperLoading(true);
+    setActionLogs([]);
+    
+    // Build chat context so the iterate agent knows what was discussed
+    const chatContext = devChatMessages
+      .slice(-10) // last 10 messages for context
+      .map(m => `${m.role === "user" ? "User" : "Dev"}: ${m.content}`)
+      .join("\n");
+    const fullTask = chatContext
+      ? `${taskToExecute}\n\n--- Chat Context ---\n${chatContext}`
+      : taskToExecute;
+    
+    const queryParams = new URLSearchParams({
+      task: fullTask,
+      spec: spec,
+      dev_context: agentResult || "",
+      workspace_path: workspacePath,
+      provider: provider,
+      model: model,
+      api_key: apiKey,
+      require_approval: requireApproval ? "true" : "false"
+    });
+    
+    const eventSource = new EventSource(`http://localhost:8000/api/dev-iterate?${queryParams.toString()}`);
+    
+    const addLog = (entry: LogEntry) => setActionLogs(prev => [...prev, entry]);
+    
+    const handleTypedEvent = (eventType: string) => (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data);
+        switch (eventType) {
+          case "thought": addLog({ type: "thought", text: data.text }); break;
+          case "tool_call": addLog({ type: "tool_call", tool: data.tool, input: data.input }); break;
+          case "tool_input": addLog({ type: "tool_input", input: data.input }); break;
+          case "tool_result": addLog({ type: "tool_result", ...data }); break;
+          case "final_answer": addLog({ type: "final_answer", text: data.text }); break;
+          case "system": addLog({ type: "system", text: data.text, level: data.level }); break;
+          case "log": addLog({ type: "log", text: data.text }); break;
+          case "cmd_start": addLog({ type: "cmd_start", cwd: data.cwd, cmd: data.cmd }); break;
+          case "cmd_output": addLog({ type: "cmd_output", stream: data.stream, line: data.line }); break;
+          case "cmd_end": addLog({ type: "cmd_end", exit_code: data.exit_code, success: data.success }); break;
+        }
+      } catch (e) {
+        console.error(`Failed to parse ${eventType} event:`, e);
+      }
+    };
+    
+    ["thought", "tool_call", "tool_input", "tool_result", "final_answer", "system", "log", "cmd_start", "cmd_output", "cmd_end"].forEach(evt => {
+      eventSource.addEventListener(evt, handleTypedEvent(evt));
+    });
+    
+    eventSource.addEventListener("action_required", (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        setPendingCommand(data.command);
+      } catch (e) { console.error(e); }
+    });
+    
+    eventSource.addEventListener("result", (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.text) {
+          setDevChatMessages(prev => [...prev, { role: "assistant", content: `✅ **Changes Applied:**\n\n${data.text}` }]);
+        }
+      } catch (e) { console.error(e); }
+    });
+    
+    eventSource.addEventListener("done", () => {
+      eventSource.close();
+      setDeveloperLoading(false);
+    });
+    
+    eventSource.onerror = () => {
+      addLog({ type: "system", text: "Iteration connection closed or errored.", level: "error" });
+      eventSource.close();
+      setDeveloperLoading(false);
+    };
   };
 
   const handleCommandApproval = async (approved: boolean) => {
@@ -557,6 +609,19 @@ export default function Home() {
                         if (e.key === "Enter" && !e.shiftKey) {
                           e.preventDefault();
                           handleChatSubmit();
+                        }
+                      }}
+                      onPaste={(e) => {
+                        const items = e.clipboardData?.items;
+                        if (!items) return;
+                        for (const item of Array.from(items)) {
+                          if (item.type.startsWith("image/")) {
+                            const file = item.getAsFile();
+                            if (file) {
+                              const named = new File([file], `clipboard-${Date.now()}.png`, { type: file.type });
+                              setAttachedFiles(prev => [...prev, named]);
+                            }
+                          }
                         }
                       }}
                     />
@@ -978,6 +1043,23 @@ export default function Home() {
                         </div>
                       </div>
                     ))}
+                    {/* Proceed / Cancel bar for pending apply plans */}
+                    {pendingApplyTask && !devChatLoading && (
+                      <div className="flex gap-2 justify-center py-2">
+                        <button
+                          onClick={handleApplyProceed}
+                          className="px-4 py-2 bg-[#FF9B51]/80 hover:bg-[#FF9B51] text-[#25343F] text-sm font-semibold rounded-lg transition-all active:scale-95 flex items-center gap-1.5 shadow-md"
+                        >
+                          ▶ Proceed
+                        </button>
+                        <button
+                          onClick={() => { setPendingApplyTask(null); setDevChatMessages(prev => [...prev, { role: "user", content: "✕ Cancelled." }]); }}
+                          className="px-4 py-2 bg-white/10 hover:bg-white/20 text-[#EAEFEF]/70 text-sm font-medium rounded-lg transition-all"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )}
                     {devChatLoading && (
                       <div className="flex justify-start">
                         <div className="bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-[#EAEFEF]/50 flex items-center gap-2">
@@ -1011,6 +1093,19 @@ export default function Home() {
                             if (e.key === "Enter" && !e.shiftKey && devChatInput.trim() && !devChatLoading) {
                               e.preventDefault();
                               handleDevChat();
+                            }
+                          }}
+                          onPaste={(e) => {
+                            const items = e.clipboardData?.items;
+                            if (!items) return;
+                            for (const item of Array.from(items)) {
+                              if (item.type.startsWith("image/")) {
+                                const file = item.getAsFile();
+                                if (file) {
+                                  const named = new File([file], `clipboard-${Date.now()}.png`, { type: file.type });
+                                  setDevChatFiles(prev => [...prev, named]);
+                                }
+                              }
                             }
                           }}
                           placeholder="Ask about the code, design decisions, or improvements..."
@@ -1054,6 +1149,15 @@ export default function Home() {
         </div>
       </main>
       
+      {/* Floating scroll-to-top button */}
+      <button
+        onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+        className="fixed bottom-6 right-6 z-50 w-10 h-10 bg-[#395370]/80 hover:bg-[#395370] text-[#EAEFEF] rounded-full shadow-lg shadow-black/30 flex items-center justify-center transition-all hover:scale-110 active:scale-95 backdrop-blur-sm border border-white/10"
+        title="Scroll to top"
+      >
+        <ChevronUp className="w-5 h-5" />
+      </button>
+
       {/* Global generic custom scrollbar style embedded */}
       <style dangerouslySetInnerHTML={{__html: `
         .custom-scrollbar::-webkit-scrollbar { width: 8px; }

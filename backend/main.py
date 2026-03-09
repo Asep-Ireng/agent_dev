@@ -12,7 +12,8 @@ import asyncio
 from PyPDF2 import PdfReader
 from crewai import Agent, Task, Crew
 from fastapi.responses import StreamingResponse
-from agent_tools import TerminalExecutionTool, WriteFileTool, ReadFileTool, ReplaceInFileTool, EditFileLinesTool, InsertAtLineTool
+from dev_tools import TerminalExecutionTool, WriteFileTool, ReadFileTool, ReplaceInFileTool, EditFileLinesTool, InsertAtLineTool, ReportTaskStatusTool
+from design_tools import UpdateSpecTool
 from dotenv import load_dotenv
 
 app = FastAPI(title="AI Agent Developer Backend")
@@ -115,29 +116,35 @@ async def generate_design_chat(
         if file_context:
             context_prompt += f"ATTACHED FILE CONTEXT:\n{file_context}\n\n"
         
+        # Shared dict for the UpdateSpecTool to write into
+        spec_result = {}
+        update_spec_tool = UpdateSpecTool(result_holder=spec_result)
+        
         designer = Agent(
             role='Lead Product Designer',
             goal='Design and aggressively iterate on a comprehensive app technical spec based on user chat and file uploads.',
-            backstory="You are a visionary Product Manager. You take rough ideas, uploaded context (like PDFs), and output pristine Markdown architecture specs.",
+            backstory="You are a visionary Product Manager. You take rough ideas, uploaded context (like PDFs), and output pristine Markdown architecture specs. You MUST always use the 'Update Specification' tool to save your work — never just output raw markdown. Always include a clear change_summary explaining what you added, modified, or removed.",
             verbose=True,
             allow_delegation=False,
-            llm=get_llm(model, provider)
+            llm=get_llm(model, provider),
+            tools=[update_spec_tool]
         )
         
-        # CrewAI currently handles text best. For true multimodal image support through litellm 
-        # inside CrewAI, you'd inject the images directly into the human message payload. 
-        # For now, we inform the agent of the images, and rely on standard text reasoning.
         design_task = Task(
-            description=f'Read the following constraints and current state, then output a completely rewritten, cohesive Markdown architectural spec.\n\n{context_prompt}',
-            expected_output='Markdown document with the entire architecture. Do not include chatty text, only the markdown.', 
+            description=f'Read the following constraints and current state, then create or update the specification. Use the "Update Specification" tool to save the spec and describe what changed.\n\n{context_prompt}',
+            expected_output='The specification should be saved via the Update Specification tool.', 
             agent=designer
         )
         
         crew = Crew(agents=[designer], tasks=[design_task])
         result = crew.kickoff()
         
-        raw_output = result.raw if hasattr(result, 'raw') else str(result)
-        return {"spec": raw_output}
+        # Read from shared dict if tool was called, fall back to raw output
+        if spec_result.get("spec"):
+            return {"spec": spec_result["spec"], "summary": spec_result.get("summary", "Specification updated.")}
+        else:
+            raw_output = result.raw if hasattr(result, 'raw') else str(result)
+            return {"spec": raw_output, "summary": "Specification generated."}
         
     except Exception as e:
         print(f"Server Error during Design Chat: {str(e)}")
@@ -404,6 +411,9 @@ async def generate_code_stream(
 
     def run_crew():
         killed = False
+        errored = False
+        task_status = {}  # Shared dict for ReportTaskStatusTool
+        error_count = [0]  # Mutable counter for step callback tracking
         old_stdout = sys.stdout
         sys.stdout = StreamCatcher()
         try:
@@ -467,19 +477,25 @@ async def generate_code_stream(
                 approval_callback=approval_callback
             )
             
-            def check_abort(*args, **kwargs):
+            report_status_tool = ReportTaskStatusTool(result_holder=task_status)
+            
+            def check_abort(step_output):
                 if abort_event.is_set():
                     _emit(q, "system", {"text": "Abort signal received. Terminating...", "level": "warn"})
                     raise InterruptedError("User triggered manual stop.")
+                # Track tool failures from step output
+                output_str = str(step_output) if step_output else ""
+                if "[FAILED]" in output_str or "[DENIED]" in output_str:
+                    error_count[0] += 1
 
             developer = Agent(
                 role='Autonomous Principal Developer',
                 goal='Build and execute the provided application spec directly in the filesystem.',
-                backstory="You are a 10x systems engineer who builds applications entirely using the terminal. IMPORTANT: Before doing ANYTHING else, you MUST create a dedicated project folder inside the workspace (e.g. 'mkdir my-app-name') and do ALL your work inside that folder. This keeps the workspace clean when multiple projects exist. When scaffolding projects with npx, npm, or any CLI tools, ALWAYS use non-interactive flags (e.g. 'npx -y create-next-app@latest ./my-app --yes --typescript --eslint --tailwind --app --src-dir --no-import-alias', 'npm init -y', 'npx -y create-vite@latest ./my-app -- --template react-ts'). NEVER run interactive prompts — they will hang and timeout. You use your Execute Terminal Command tool to create directories, install dependencies, and run scripts. You ALWAYS use your Write File tool to save NEW source code into files. Do NOT use echo or cat to write long blocks of code into files, use Write File instead. When you need to EDIT an existing file, ALWAYS use Read File first to see the current content and line numbers. For targeted edits, use Edit File Lines (to replace a specific line range) or Insert At Line (to add code at a specific position). Use Replace In File if you have a unique text snippet to match. Never rewrite a whole file just to change a few lines.",
+                backstory="You are a 10x systems engineer who builds applications entirely using the terminal. ENVIRONMENT: You are on Windows (cmd/PowerShell) — use Windows commands (dir, mkdir, del, copy, type) NOT Unix commands (ls, rm, cp, cat). NEVER run recursive directory listings like 'dir /s' or 'tree' — they dump thousands of files from node_modules and are useless. Use 'dir' (without /s) to see just the top-level contents of a folder. IMPORTANT: Before doing ANYTHING else, you MUST create a dedicated project folder inside the workspace (e.g. 'mkdir my-app-name') and do ALL your work inside that folder. This keeps the workspace clean when multiple projects exist. When scaffolding projects with npx, npm, or any CLI tools, ALWAYS use non-interactive flags (e.g. 'npx -y create-next-app@latest ./my-app --yes --typescript --eslint --tailwind --app --src-dir --no-import-alias', 'npm init -y', 'npx -y create-vite@latest ./my-app -- --template react-ts'). NEVER run interactive prompts — they will hang and timeout. You use your Execute Terminal Command tool to create directories, install dependencies, and run scripts. You ALWAYS use your Write File tool to save NEW source code into files. Do NOT use echo or cat to write long blocks of code into files, use Write File instead. When you need to EDIT an existing file, ALWAYS use Read File first to see the current content and line numbers. For targeted edits, use Edit File Lines (to replace a specific line range) or Insert At Line (to add code at a specific position). Use Replace In File if you have a unique text snippet to match. Never rewrite a whole file just to change a few lines. IMPORTANT: Before giving your Final Answer, you MUST call the 'Report Task Status' tool to indicate whether the task succeeded, failed, or partially completed.",
                 verbose=True,
                 allow_delegation=False,
                 llm=get_llm(model, provider),
-                tools=[terminal_tool, write_file_tool, read_file_tool, replace_in_file_tool, edit_file_lines_tool, insert_at_line_tool],
+                tools=[terminal_tool, write_file_tool, read_file_tool, replace_in_file_tool, edit_file_lines_tool, insert_at_line_tool, report_status_tool],
                 step_callback=check_abort
             )
             
@@ -500,10 +516,22 @@ async def generate_code_stream(
             killed = True
             _emit(q, "system", {"text": f"Process stopped: {str(e)}", "level": "warn"})
         except Exception as e:
+            errored = True
             _emit(q, "system", {"text": f"Build failure: {str(e)}", "level": "error"})
         finally:
             sys.stdout = old_stdout
-            q.put(f"event: done\ndata: {_json.dumps({'killed': killed})}\n\n")
+            # Determine final status: LLM report > step tracking > exception
+            if task_status.get("status"):
+                final_status = task_status["status"]
+            elif errored:
+                final_status = "failed"
+            elif killed:
+                final_status = "killed"
+            elif error_count[0] > 0:
+                final_status = "partial"
+            else:
+                final_status = "success"
+            q.put(f"event: done\ndata: {_json.dumps({'killed': killed, 'error': errored, 'status': final_status, 'status_summary': task_status.get('summary', '')})}\n\n")
 
     threading.Thread(target=run_crew).start()
 
@@ -529,6 +557,7 @@ async def generate_code_stream(
 async def dev_iterate(
     task: str = "",
     spec: str = "",
+    dev_context: str = "",
     workspace_path: str = "./workspace",
     provider: str = "Google (Gemini)",
     model: str = "gemini-2.5-flash-preview-05-20",
@@ -627,6 +656,9 @@ async def dev_iterate(
 
     def run_iterate():
         killed = False
+        errored = False
+        task_status = {}
+        error_count = [0]
         old_stdout = sys.stdout
         sys.stdout = StreamCatcher()
         try:
@@ -677,24 +709,33 @@ async def dev_iterate(
                 approval_callback=approval_callback
             )
             
-            def check_abort(*args, **kwargs):
+            report_status_tool = ReportTaskStatusTool(result_holder=task_status)
+            
+            def check_abort(step_output):
                 if abort_event.is_set():
                     _emit(q, "system", {"text": "Abort signal received. Terminating...", "level": "warn"})
                     raise InterruptedError("User triggered manual stop.")
+                output_str = str(step_output) if step_output else ""
+                if "[FAILED]" in output_str or "[DENIED]" in output_str:
+                    error_count[0] += 1
 
             iterator = Agent(
                 role='Iterative Developer',
                 goal='Apply the requested changes to the existing project.',
-                backstory="You are iterating on an existing project. The project was built according to a spec and already exists in the workspace. Your job is to make the specific changes the user requested. ALWAYS use Read File first to understand the current state of relevant files before making edits. For targeted edits, use Edit File Lines (to replace a specific line range) or Insert At Line (to add code at a specific position). Use Replace In File if you have a unique text snippet to match. Use Write File only for creating new files. Use the terminal for installing dependencies, running builds, or testing. Never rewrite a whole file just to change a few lines.",
+                backstory="You are iterating on an existing project. ENVIRONMENT: You are on Windows (cmd/PowerShell) — use Windows commands (dir, mkdir, del, copy, type) NOT Unix commands (ls, rm, cp, cat). NEVER run recursive directory listings like 'dir /s' or 'tree' — they dump thousands of files from node_modules and are useless. Use 'dir' (without /s) to see just the top-level contents of a folder. The project was built according to a spec and already exists in the workspace. Your job is to make the specific changes the user requested. ALWAYS use Read File first to understand the current state of relevant files before making edits. For targeted edits, use Edit File Lines (to replace a specific line range) or Insert At Line (to add code at a specific position). Use Replace In File if you have a unique text snippet to match. Use Write File only for creating new files. Use the terminal for installing dependencies, running builds, or testing. Never rewrite a whole file just to change a few lines. IMPORTANT: Before giving your Final Answer, you MUST call the 'Report Task Status' tool to indicate whether the task succeeded, failed, or partially completed.",
                 verbose=True,
                 allow_delegation=False,
                 llm=get_llm(model, provider),
-                tools=[terminal_tool, write_file_tool, read_file_tool, replace_in_file_tool, edit_file_lines_tool, insert_at_line_tool],
+                tools=[terminal_tool, write_file_tool, read_file_tool, replace_in_file_tool, edit_file_lines_tool, insert_at_line_tool, report_status_tool],
                 step_callback=check_abort
             )
             
+            context_section = ""
+            if dev_context:
+                context_section = f"\n\n--- Previous Build Summary ---\nThe initial development agent produced this summary of what was built. Use this to know what files exist and where — do NOT re-read every file. Only read the specific files you need to modify.\n\n{dev_context}\n"
+            
             iterate_task = Task(
-                description=f'The user has requested the following change to the existing project:\n\n{task}\n\nFor context, here is the project spec:\n\n{spec}\n\nRead the relevant files, make the changes, and verify they work.',
+                description=f'The user has requested the following change to the existing project:\n\n{task}\n\nFor context, here is the project spec:\n\n{spec}{context_section}\n\nOnly read the files you need to change — do NOT explore the entire project. Make the changes and verify they work.',
                 expected_output='A summary of what was changed and any relevant details.',
                 agent=iterator
             )
@@ -709,10 +750,21 @@ async def dev_iterate(
             killed = True
             _emit(q, "system", {"text": f"Process stopped: {str(e)}", "level": "warn"})
         except Exception as e:
+            errored = True
             _emit(q, "system", {"text": f"Iteration failure: {str(e)}", "level": "error"})
         finally:
             sys.stdout = old_stdout
-            q.put(f"event: done\ndata: {_json.dumps({'killed': killed})}\n\n")
+            if task_status.get("status"):
+                final_status = task_status["status"]
+            elif errored:
+                final_status = "failed"
+            elif killed:
+                final_status = "killed"
+            elif error_count[0] > 0:
+                final_status = "partial"
+            else:
+                final_status = "success"
+            q.put(f"event: done\ndata: {_json.dumps({'killed': killed, 'error': errored, 'status': final_status, 'status_summary': task_status.get('summary', '')})}\n\n")
 
     threading.Thread(target=run_iterate).start()
 
