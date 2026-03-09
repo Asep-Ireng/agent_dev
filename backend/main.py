@@ -28,6 +28,11 @@ approval_state = {
     "feedback": None
 }
 
+# Live-toggleable approval setting (mutable dict so tools can see changes mid-run)
+approval_settings = {
+    "require": False
+}
+
 class ApproveRequest(BaseModel):
     approved: bool
     feedback: str | None = None
@@ -271,6 +276,7 @@ async def generate_code_stream(
     
     # Reset the abort event before starting a new run
     abort_event.clear()
+    approval_settings["require"] = require_approval.lower() == "true"
     
     q = queue.Queue()
 
@@ -419,7 +425,7 @@ async def generate_code_stream(
         try:
             _emit(q, "system", {"text": "Initializing Developer Agent...", "level": "info"})
             
-            def approval_callback(command: str) -> tuple[bool, str | None]:
+            def raw_approval_callback(command: str) -> tuple[bool, str | None]:
                 # Notify frontend that an action needs approval
                 q.put(f"event: action_required\ndata: {_json.dumps({'command': command})}\n\n")
                 
@@ -434,6 +440,12 @@ async def generate_code_stream(
                     raise InterruptedError("User triggered manual stop while waiting for approval.")
                     
                 return (approval_state["approved"], approval_state.get("feedback"))
+
+            def approval_callback(command: str) -> tuple[bool, str | None]:
+                """Wrapper that checks the live approval setting before prompting."""
+                if not approval_settings["require"]:
+                    return (True, None)  # Auto-approve when disabled mid-run
+                return raw_approval_callback(command)
 
             def stream_callback(event_type, data):
                 """Stream subprocess output to frontend in real-time."""
@@ -494,6 +506,7 @@ async def generate_code_stream(
                 backstory="You are a 10x systems engineer who builds applications entirely using the terminal. ENVIRONMENT: You are on Windows (cmd/PowerShell) — use Windows commands (dir, mkdir, del, copy, type) NOT Unix commands (ls, rm, cp, cat). NEVER run recursive directory listings like 'dir /s' or 'tree' — they dump thousands of files from node_modules and are useless. Use 'dir' (without /s) to see just the top-level contents of a folder. IMPORTANT: Before doing ANYTHING else, you MUST create a dedicated project folder inside the workspace (e.g. 'mkdir my-app-name') and do ALL your work inside that folder. This keeps the workspace clean when multiple projects exist. When scaffolding projects with npx, npm, or any CLI tools, ALWAYS use non-interactive flags (e.g. 'npx -y create-next-app@latest ./my-app --yes --typescript --eslint --tailwind --app --src-dir --no-import-alias', 'npm init -y', 'npx -y create-vite@latest ./my-app -- --template react-ts'). NEVER run interactive prompts — they will hang and timeout. You use your Execute Terminal Command tool to create directories, install dependencies, and run scripts. You ALWAYS use your Write File tool to save NEW source code into files. Do NOT use echo or cat to write long blocks of code into files, use Write File instead. When you need to EDIT an existing file, ALWAYS use Read File first to see the current content and line numbers. For targeted edits, use Edit File Lines (to replace a specific line range) or Insert At Line (to add code at a specific position). Use Replace In File if you have a unique text snippet to match. Never rewrite a whole file just to change a few lines. IMPORTANT: Before giving your Final Answer, you MUST call the 'Report Task Status' tool to indicate whether the task succeeded, failed, or partially completed.",
                 verbose=True,
                 allow_delegation=False,
+                max_iter=75,
                 llm=get_llm(model, provider),
                 tools=[terminal_tool, write_file_tool, read_file_tool, replace_in_file_tool, edit_file_lines_tool, insert_at_line_tool, report_status_tool],
                 step_callback=check_abort
@@ -567,6 +580,7 @@ async def dev_iterate(
     """SSE endpoint for iterative development — agent executes changes based on user instructions."""
     set_keys(api_key, provider)
     abort_event.clear()
+    approval_settings["require"] = require_approval.lower() == "true"
     
     q = queue.Queue()
 
@@ -664,7 +678,7 @@ async def dev_iterate(
         try:
             _emit(q, "system", {"text": "Initializing Iteration Agent...", "level": "info"})
             
-            def approval_callback(command: str) -> tuple[bool, str | None]:
+            def raw_approval_callback(command: str) -> tuple[bool, str | None]:
                 q.put(f"event: action_required\ndata: {_json.dumps({'command': command})}\n\n")
                 approval_state["event"].clear()
                 while not approval_state["event"].is_set() and not abort_event.is_set():
@@ -672,6 +686,12 @@ async def dev_iterate(
                 if abort_event.is_set():
                     raise InterruptedError("User triggered manual stop while waiting for approval.")
                 return (approval_state["approved"], approval_state.get("feedback"))
+
+            def approval_callback(command: str) -> tuple[bool, str | None]:
+                """Wrapper that checks the live approval setting before prompting."""
+                if not approval_settings["require"]:
+                    return (True, None)
+                return raw_approval_callback(command)
 
             def stream_callback(event_type, data):
                 if event_type == "cmd_start":
@@ -725,6 +745,7 @@ async def dev_iterate(
                 backstory="You are iterating on an existing project. ENVIRONMENT: You are on Windows (cmd/PowerShell) — use Windows commands (dir, mkdir, del, copy, type) NOT Unix commands (ls, rm, cp, cat). NEVER run recursive directory listings like 'dir /s' or 'tree' — they dump thousands of files from node_modules and are useless. Use 'dir' (without /s) to see just the top-level contents of a folder. The project was built according to a spec and already exists in the workspace. Your job is to make the specific changes the user requested. ALWAYS use Read File first to understand the current state of relevant files before making edits. For targeted edits, use Edit File Lines (to replace a specific line range) or Insert At Line (to add code at a specific position). Use Replace In File if you have a unique text snippet to match. Use Write File only for creating new files. Use the terminal for installing dependencies, running builds, or testing. Never rewrite a whole file just to change a few lines. IMPORTANT: Before giving your Final Answer, you MUST call the 'Report Task Status' tool to indicate whether the task succeeded, failed, or partially completed.",
                 verbose=True,
                 allow_delegation=False,
+                max_iter=50,
                 llm=get_llm(model, provider),
                 tools=[terminal_tool, write_file_tool, read_file_tool, replace_in_file_tool, edit_file_lines_tool, insert_at_line_tool, report_status_tool],
                 step_callback=check_abort
@@ -798,6 +819,17 @@ async def approve_action(req: ApproveRequest):
     approval_state["feedback"] = req.feedback
     approval_state["event"].set()
     return {"status": "Action approval processed."}
+
+@app.post("/api/develop/toggle-approval")
+async def toggle_approval(require: bool):
+    """Live-toggle HITL approval mid-run."""
+    approval_settings["require"] = require
+    # If we just disabled approval and the agent is waiting for one, auto-approve it
+    if not require and not approval_state["event"].is_set():
+        approval_state["approved"] = True
+        approval_state["feedback"] = None
+        approval_state["event"].set()
+    return {"status": f"Approval requirement set to {require}"}
 
 if __name__ == "__main__":
     import uvicorn

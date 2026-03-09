@@ -452,7 +452,7 @@ export default function Home() {
             <Sparkles className="w-5 h-5 text-[#EAEFEF]" />
           </div>
           <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-[#EAEFEF] to-[#BFC9D1]">
-            AI Dev Studio
+            Agentic Dev Studio
           </h1>
         </div>
 
@@ -519,7 +519,14 @@ export default function Home() {
             <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center justify-between">
               <span>HITL Verification</span>
               <button 
-                onClick={() => setRequireApproval(!requireApproval)}
+                onClick={() => {
+                  const newVal = !requireApproval;
+                  setRequireApproval(newVal);
+                  // If dev agent is running, live-update the approval setting
+                  if (developerLoading) {
+                    fetch(`http://localhost:8000/api/develop/toggle-approval?require=${newVal}`, { method: "POST" }).catch(() => {});
+                  }
+                }}
                 className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full transition-colors duration-200 ease-in-out ${requireApproval ? 'bg-[#FF9B51]' : 'bg-[#EAEFEF]/20'}`}
               >
                 <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ease-in-out mt-0.5 ${requireApproval ? 'translate-x-4' : 'translate-x-0.5'}`} />
