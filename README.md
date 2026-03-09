@@ -1,46 +1,96 @@
-# AI Dev Studio 🚀
+# AI Dev Studio — Project Component Map
 
-An autonomous development platform built with FastAPI and Next.js, featuring a lead designer agent and a principal developer agent.
+## Backend (`backend/`)
 
-## 🎨 Premium Theme
+### [main.py](backend/main.py) — Core API Server
 
-The Studio features a custom, premium design system:
+FastAPI server with all endpoints and agent orchestration.
 
-- **Background**: Dark Navy (#25343F)
-- **Accents**: Radiant Orange (#FF9B51)
-- **Text**: Off-white Softness (#EAEFEF)
-- **Muted**: Steel Blue (#BFC9D1)
+| Endpoint                            | Purpose                                                                                                            |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `POST /api/design/chat`             | Design chat — takes user ideas/files, runs a CrewAI design agent with `UpdateSpecTool` to generate/update the spec |
+| `POST /api/dev-chat`                | Dev chat — lightweight LLM call for Ask/Apply mode (no agent, just litellm)                                        |
+| `GET /api/develop`                  | **Main build** — SSE stream, spawns a CrewAI dev agent that builds the app from spec                               |
+| `GET /api/dev-iterate`              | **Iterate build** — SSE stream, spawns an iterate agent for targeted changes (Apply mode)                          |
+| `POST /api/develop/stop`            | Kill switch — sets `abort_event` to stop the running agent                                                         |
+| `POST /api/develop/approve`         | HITL — approve/reject a pending action                                                                             |
+| `POST /api/develop/toggle-approval` | Live-toggle HITL mid-run (auto-approves pending if disabled)                                                       |
 
-## 🛠️ Tech Stack
+**Key internals:**
 
-- **Frontend**: Next.js 15+, Tailwind CSS, Framer Motion, Lucide Icons.
-- **Backend**: FastAPI, Uvicorn, Python-dotenv.
-- **Agents**: Custom implementation using Google Gemini & OpenAI.
+- `StreamCatcher` — captures CrewAI's stdout, parses ReAct patterns (`Thought:`, `Action:`, `Observation:`), and emits typed SSE events
+- `approval_settings` — mutable global dict for live HITL toggling
+- `abort_event` / `approval_state` — threading primitives for stop + approval flow
 
-## 🚀 Getting Started
+---
 
-### Prerequisites
+### [dev_tools.py](backend/dev_tools.py) — Development Agent Tools
 
-- Node.js & npm
-- Python 3.10+
-- Proper API Keys (Google/OpenAI)
+All tools available to the dev and iterate agents:
 
-### Setup
+| Tool                    | What it does                                                                                                                               |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `TerminalExecutionTool` | Runs shell commands with real-time output streaming, approval flow, timeout (300s), and **output truncation** (5K char cap to save tokens) |
+| `WriteFileTool`         | Creates/overwrites files in the workspace                                                                                                  |
+| `ReadFileTool`          | Reads files with optional line range                                                                                                       |
+| `ReplaceInFileTool`     | Find-and-replace exact text in a file                                                                                                      |
+| `EditFileLinesTool`     | Replace a specific line range                                                                                                              |
+| `InsertAtLineTool`      | Insert content before a specific line                                                                                                      |
+| `ReportTaskStatusTool`  | LLM self-reports task status (`success`/`failed`/`partial`) before finishing                                                               |
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/Asep-Ireng/agent_dev.git
-   cd agent_dev
-   ```
-2. Configure `.env` files based on `.env.example`.
-3. Run the development environment:
-   ```bash
-   ./start.bat
-   ```
+---
 
-## 📂 Project Structure
+### [design_tools.py](backend/design_tools.py) — Design Agent Tools
 
-- `/frontend`: Next.js web application.
-- `/backend`: FastAPI service for agent orchestration.
-- `agent_workflow.py`: Core logic for agentic state management.
-- `app_gui.py`: Alternative GUI interface.
+Single tool for the design chat agent:
+
+| Tool             | What it does                                                                                                                                              |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `UpdateSpecTool` | Saves the updated spec + a change summary into a shared dict. The backend reads this to return both the spec and a human-readable summary of what changed |
+
+---
+
+## Frontend (`frontend/src/app/`)
+
+### [page.tsx](frontend/src/app/page.tsx) — Single-Page App
+
+The entire UI in one file. Key sections:
+
+| Section               | What it does                                                                                  |
+| --------------------- | --------------------------------------------------------------------------------------------- |
+| **Sidebar**           | Provider/model/API key selection, workspace path, HITL toggle (live-toggleable)               |
+| **Design Tab**        | Chat with the design agent, attach files (PDFs, images, clipboard paste), spec preview/editor |
+| **Develop Tab**       | "Build from Spec" button, live terminal stream, tool result cards, agent thoughts             |
+| **Dev Chat Panel**    | Ask/Apply mode toggle, chat with LLM about the code, Proceed/Cancel for Apply mode            |
+| **Scroll-to-top FAB** | Floating button bottom-right for long terminal output                                         |
+
+**Key state:**
+
+- `spec` — the current architecture spec (synced between design chat and spec editor)
+- `agentResult` — output from the last dev run (passed as `dev_context` to iterate agent)
+- `pendingApplyTask` — holds the agent's proposed plan in Apply mode until user approves
+- `requireApproval` — HITL toggle, live-synced to backend via `/api/develop/toggle-approval`
+
+### [globals.css](frontend/src/app/globals.css) — Global Styles
+
+Custom color palette, Tailwind imports, base styling.
+
+---
+
+## Data Flow
+
+```
+User idea → Design Chat → UpdateSpecTool → Spec
+                                              ↓
+                                    "Build from Spec"
+                                              ↓
+                            Dev Agent (75 iter max)
+                          TerminalTool, WriteFile, etc.
+                                              ↓
+                                         agentResult
+                                              ↓
+                              Dev Chat (Ask/Apply mode)
+                                              ↓
+                                    Iterate Agent (50 iter max)
+                                    gets spec + dev_context
+```
