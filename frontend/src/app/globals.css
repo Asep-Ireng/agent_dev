@@ -1,11 +1,11 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 :root {
-  --background: #EAEFEF;
-  --foreground: #25343F;
-  --navy: #25343F;
-  --orange: #FF9B51;
-  --muted: #BFC9D1;
+  --background: #eaefef;
+  --foreground: #25343f;
+  --navy: #25343f;
+  --orange: #ff9b51;
+  --muted: #bfc9d1;
 }
 
 @theme inline {
@@ -20,8 +20,8 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #25343F;
-    --foreground: #EAEFEF;
+    --background: #25343f;
+    --foreground: #eaefef;
   }
 }
 

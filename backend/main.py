@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from pydantic import BaseModel
 from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,12 +9,24 @@ import sys
 import threading
 import queue
 import asyncio
+import traceback
 from PyPDF2 import PdfReader
 from crewai import Agent, Task, Crew
 from fastapi.responses import StreamingResponse
-from dev_tools import TerminalExecutionTool, WriteFileTool, ReadFileTool, ReplaceInFileTool, EditFileLinesTool, InsertAtLineTool, ReportTaskStatusTool
+from dev_tools import (
+    TerminalExecutionTool,
+    WriteFileTool,
+    ReadFileTool,
+    ReplaceInFileTool,
+    EditFileLinesTool,
+    InsertAtLineTool,
+    ReportTaskStatusTool,
+)
 from design_tools import UpdateSpecTool
 from dotenv import load_dotenv
+
+# Load environment variables from root .env (single source of truth)
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 app = FastAPI(title="AI Agent Developer Backend")
 
@@ -22,20 +34,29 @@ app = FastAPI(title="AI Agent Developer Backend")
 abort_event = threading.Event()
 
 # State for HITL execution approvals
-approval_state = {
-    "event": threading.Event(),
-    "approved": False,
-    "feedback": None
-}
+approval_state = {"event": threading.Event(), "approved": False, "feedback": None}
 
 # Live-toggleable approval setting (mutable dict so tools can see changes mid-run)
-approval_settings = {
-    "require": False
+approval_settings = {"require": False}
+
+# Runtime settings (loaded from .env, modifiable via API)
+runtime_settings = {
+    "provider": os.getenv("DEFAULT_PROVIDER", "Google (Gemini)"),
+    "google_model": os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"),
+    "openai_model": os.getenv("OPENAI_MODEL", "gpt-4o"),
 }
+
+# Base workspace directory — all workspace_path values must resolve inside this
+BASE_WORKSPACE_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "workspace")
+)
+os.makedirs(BASE_WORKSPACE_DIR, exist_ok=True)
+
 
 class ApproveRequest(BaseModel):
     approved: bool
     feedback: str | None = None
+
 
 # Allow requests from our Next.js frontend (localhost:3000)
 app.add_middleware(
@@ -46,73 +67,189 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Shared AI Helper
+# ==================================
+# HELPERS
+# ==================================
+
+
+def get_current_provider() -> str:
+    return runtime_settings["provider"]
+
+
+def get_current_model() -> str:
+    provider = get_current_provider()
+    if provider == "OpenAI":
+        return runtime_settings["openai_model"]
+    return runtime_settings["google_model"]
+
+
 def get_llm(model_name: str, provider: str):
     if provider == "Google (Gemini)":
         return f"gemini/{model_name}"
     return model_name
 
-def set_keys(api_key: str, provider: str):
+
+def set_keys_from_env():
+    """Set API keys in environment from loaded .env values."""
+    provider = get_current_provider()
     if provider == "OpenAI":
-        os.environ["OPENAI_API_KEY"] = api_key
+        key = os.getenv("OPENAI_API_KEY", "")
+        if key:
+            os.environ["OPENAI_API_KEY"] = key
     elif provider == "Google (Gemini)":
-        os.environ["GEMINI_API_KEY"] = api_key
-        os.environ["GOOGLE_API_KEY"] = api_key
-    else:
-        raise HTTPException(status_code=400, detail="Unknown provider")
+        key = os.getenv("GOOGLE_API_KEY", "")
+        if key:
+            os.environ["GEMINI_API_KEY"] = key
+            os.environ["GOOGLE_API_KEY"] = key
+
+
+def validate_workspace_path(workspace_path: str) -> str:
+    """Validate and normalize workspace_path. Returns absolute path or raises HTTPException."""
+    resolved = os.path.abspath(workspace_path)
+    base_with_sep = BASE_WORKSPACE_DIR + os.sep
+    if resolved != BASE_WORKSPACE_DIR and not resolved.startswith(base_with_sep):
+        raise HTTPException(status_code=400, detail="Invalid workspace path.")
+    return resolved
+
+
+def validate_chat_history(history_json: str) -> list:
+    """Parse and validate chat history JSON. Returns list of validated messages."""
+    import json as _json_mod
+
+    MAX_CONTENT_LENGTH = 50000
+    ALLOWED_ROLES = {"user", "assistant"}
+
+    if not history_json:
+        return []
+
+    try:
+        parsed = _json_mod.loads(history_json)
+    except _json_mod.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid chat history JSON.")
+
+    if not isinstance(parsed, list):
+        raise HTTPException(status_code=400, detail="Chat history must be a list.")
+
+    validated = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role", "")
+        content = item.get("content", "")
+        if role not in ALLOWED_ROLES or not isinstance(content, str):
+            continue
+        validated.append({"role": role, "content": content[:MAX_CONTENT_LENGTH]})
+
+    return validated
+
+
+# Set keys on startup
+set_keys_from_env()
 
 
 # ==================================
 # API ROUTES & MODELS
 # ==================================
 
+
 class DesignRequest(BaseModel):
     idea: str
-    provider: str
-    model: str
-    api_key: str
+
 
 class DevelopRequest(BaseModel):
     spec: str
-    provider: str
-    model: str
-    api_key: str
+    workspace_path: str = BASE_WORKSPACE_DIR
+    require_approval: bool = False
+
+
+class IterateRequest(BaseModel):
+    task: str = ""
+    spec: str = ""
+    dev_context: str = ""
+    workspace_path: str = BASE_WORKSPACE_DIR
+    require_approval: bool = False
+
+
+class SettingsUpdate(BaseModel):
+    provider: str | None = None
+    model: str | None = None
+
+
+# ==================================
+# SETTINGS ENDPOINTS
+# ==================================
+
+
+@app.get("/api/settings")
+async def get_settings():
+    """Returns current runtime config (no secrets)."""
+    return {
+        "provider": get_current_provider(),
+        "model": get_current_model(),
+        "google_model": runtime_settings["google_model"],
+        "openai_model": runtime_settings["openai_model"],
+        "available_providers": ["OpenAI", "Google (Gemini)"],
+        "workspace_path": BASE_WORKSPACE_DIR,
+    }
+
+
+@app.post("/api/settings")
+async def update_settings(req: SettingsUpdate):
+    """Update provider/model at runtime (no secrets involved)."""
+    if req.provider is not None:
+        if req.provider not in ["OpenAI", "Google (Gemini)"]:
+            raise HTTPException(status_code=400, detail="Unknown provider.")
+        runtime_settings["provider"] = req.provider
+        set_keys_from_env()  # Re-apply keys for new provider
+    if req.model is not None:
+        provider = get_current_provider()
+        if provider == "OpenAI":
+            runtime_settings["openai_model"] = req.model
+        else:
+            runtime_settings["google_model"] = req.model
+    return {
+        "status": "ok",
+        "provider": get_current_provider(),
+        "model": get_current_model(),
+    }
+
 
 @app.post("/api/design/chat")
 async def generate_design_chat(
-    idea: str = Form(...),
-    spec: str = Form(""),
-    provider: str = Form(...),
-    model: str = Form(...),
-    api_key: str = Form(...),
-    files: List[UploadFile] = File(None)
+    idea: str = Form(...), spec: str = Form(""), files: List[UploadFile] = File(None)
 ):
     try:
-        set_keys(api_key, provider)
-        
+        set_keys_from_env()
+        provider = get_current_provider()
+        model = get_current_model()
+
         # 1. Process Uploaded Files
         file_context = ""
         image_urls = []
-        
+
         if files:
             for file in files:
                 contents = await file.read()
-                
+
                 # Extract PDF text
-                if file.filename.lower().endswith('.pdf'):
+                if file.filename.lower().endswith(".pdf"):
                     pdf_reader = PdfReader(io.BytesIO(contents))
                     text = ""
                     for page in pdf_reader.pages:
                         text += page.extract_text() + "\n"
-                    file_context += f"\n--- PDF Extracted Content: {file.filename} ---\n{text}\n"
-                
+                    file_context += (
+                        f"\n--- PDF Extracted Content: {file.filename} ---\n{text}\n"
+                    )
+
                 # Encode Images to Base64 (Useful if model natively supports data URLs in CrewAI)
-                elif file.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
-                    base64_image = base64.b64encode(contents).decode('utf-8')
+                elif file.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    base64_image = base64.b64encode(contents).decode("utf-8")
                     mime_type = file.content_type
                     data_url = f"data:{mime_type};base64,{base64_image}"
                     image_urls.append(data_url)
-                    file_context += f"\n--- Image Uploaded: {file.filename} (passed natively) ---\n"
+                    file_context += (
+                        f"\n--- Image Uploaded: {file.filename} (passed natively) ---\n"
+                    )
 
         # 2. Build the Prompt Context
         context_prompt = f"User Request / Idea: {idea}\n\n"
@@ -120,76 +257,95 @@ async def generate_design_chat(
             context_prompt += f"CURRENT SPECIFICATION (Edit this based on the user's new request):\n{spec}\n\n"
         if file_context:
             context_prompt += f"ATTACHED FILE CONTEXT:\n{file_context}\n\n"
-        
+
         # Shared dict for the UpdateSpecTool to write into
         spec_result = {}
         update_spec_tool = UpdateSpecTool(result_holder=spec_result)
-        
+
         designer = Agent(
-            role='Lead Product Designer',
-            goal='Design and aggressively iterate on a comprehensive app technical spec based on user chat and file uploads.',
+            role="Lead Product Designer",
+            goal="Design and aggressively iterate on a comprehensive app technical spec based on user chat and file uploads.",
             backstory="You are a visionary Product Manager. You take rough ideas, uploaded context (like PDFs), and output pristine Markdown architecture specs. You MUST always use the 'Update Specification' tool to save your work — never just output raw markdown. Always include a clear change_summary explaining what you added, modified, or removed.",
             verbose=True,
             allow_delegation=False,
             llm=get_llm(model, provider),
-            tools=[update_spec_tool]
+            tools=[update_spec_tool],
         )
-        
+
         design_task = Task(
             description=f'Read the following constraints and current state, then create or update the specification. Use the "Update Specification" tool to save the spec and describe what changed.\n\n{context_prompt}',
-            expected_output='The specification should be saved via the Update Specification tool.', 
-            agent=designer
+            expected_output="The specification should be saved via the Update Specification tool.",
+            agent=designer,
         )
-        
+
         crew = Crew(agents=[designer], tasks=[design_task])
         result = crew.kickoff()
-        
+
         # Read from shared dict if tool was called, fall back to raw output
         if spec_result.get("spec"):
-            return {"spec": spec_result["spec"], "summary": spec_result.get("summary", "Specification updated.")}
+            return {
+                "spec": spec_result["spec"],
+                "summary": spec_result.get("summary", "Specification updated."),
+            }
         else:
-            raw_output = result.raw if hasattr(result, 'raw') else str(result)
+            raw_output = result.raw if hasattr(result, "raw") else str(result)
             return {"spec": raw_output, "summary": "Specification generated."}
-        
+
     except Exception as e:
-        print(f"Server Error during Design Chat: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Server Error during Design Chat: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail="An internal error occurred during design generation.",
+        )
+
 
 @app.post("/api/dev-chat")
 async def dev_chat(
     message: str = Form(...),
     spec: str = Form(""),
-    workspace_path: str = Form("./workspace"),
+    workspace_path: str = Form(BASE_WORKSPACE_DIR),
     history: str = Form("[]"),  # JSON string of [{role, content}]
-    provider: str = Form("Google (Gemini)"),
-    model: str = Form("gemini-2.5-flash-preview-05-20                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   "),
-    api_key: str = Form(""),
-    files: List[UploadFile] = File(default=[])
+    files: List[UploadFile] = File(default=[]),
 ):
     """Chat with the dev agent about the code it built, with optional image attachments."""
-    set_keys(api_key, provider)
-    
+    set_keys_from_env()
+    provider = get_current_provider()
+    model = get_current_model()
+
     try:
         import litellm
-        import json
-        
-        # Parse chat history from JSON string
-        chat_history = json.loads(history) if history else []
-        
+
+        # Validate inputs
+        ws = validate_workspace_path(workspace_path)
+        chat_history = validate_chat_history(history)
+
         # Scan the workspace for a file tree to give the agent context
         file_tree = []
-        ws = os.path.abspath(workspace_path)
         if os.path.exists(ws):
             for root, dirs, files_list in os.walk(ws):
-                dirs[:] = [d for d in dirs if d not in ('node_modules', '.git', '__pycache__', '.next', 'dist', 'build', '.venv', 'venv')]
+                dirs[:] = [
+                    d
+                    for d in dirs
+                    if d
+                    not in (
+                        "node_modules",
+                        ".git",
+                        "__pycache__",
+                        ".next",
+                        "dist",
+                        "build",
+                        ".venv",
+                        "venv",
+                    )
+                ]
                 for fname in files_list:
                     rel = os.path.relpath(os.path.join(root, fname), ws)
                     file_tree.append(rel)
-        
+
         tree_str = "\n".join(file_tree[:100])
         if len(file_tree) > 100:
             tree_str += f"\n... and {len(file_tree) - 100} more files"
-        
+
         system_prompt = f"""You are the developer who just built an application. You built it according to this spec:
 
 ---
@@ -213,98 +369,109 @@ If the user asks about specific file contents, tell them which file to look at a
 Keep responses concise and useful. Use markdown formatting."""
 
         messages = [{"role": "system", "content": system_prompt}]
-        
-        # Add chat history
+
+        # Add validated chat history
         for msg in chat_history:
             messages.append({"role": msg["role"], "content": msg["content"]})
-        
+
         # Build the current user message — may include images
         user_content = []
         user_content.append({"type": "text", "text": message})
-        
+
         # Process uploaded images
         if files:
             for file in files:
                 contents = await file.read()
-                if file.filename and file.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif')):
-                    b64 = base64.b64encode(contents).decode('utf-8')
+                if file.filename and file.filename.lower().endswith(
+                    (".png", ".jpg", ".jpeg", ".webp", ".gif")
+                ):
+                    b64 = base64.b64encode(contents).decode("utf-8")
                     mime = file.content_type or "image/png"
-                    user_content.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime};base64,{b64}"}
-                    })
-        
+                    user_content.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{b64}"},
+                        }
+                    )
+
         # Use multimodal format if images are attached, plain text otherwise
         if len(user_content) == 1:
             messages.append({"role": "user", "content": message})
         else:
             messages.append({"role": "user", "content": user_content})
-        
+
         model_str = get_llm(model, provider)
         response = litellm.completion(model=model_str, messages=messages)
-        
+
         reply = response.choices[0].message.content
         return {"reply": reply}
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Server Error during Dev Chat: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Server Error during Dev Chat: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500, detail="An internal error occurred during dev chat."
+        )
+
 
 import json as _json
 import re as _re
 
+
 def _strip_ansi(text: str) -> str:
     """Remove ANSI escape codes and naked color codes from CrewAI/langchain output."""
-    text = _re.sub(r'\x1b\[[0-9;]*[mGKF]', '', text)
-    text = _re.sub(r'\[\d+m', '', text)
+    text = _re.sub(r"\x1b\[[0-9;]*[mGKF]", "", text)
+    text = _re.sub(r"\[\d+m", "", text)
     return text.strip()
+
 
 def _emit(q: queue.Queue, event_type: str, payload: dict):
     """Helper to push a typed SSE event onto the queue."""
     q.put(f"event: {event_type}\ndata: {_json.dumps(payload)}\n\n")
 
-@app.get("/api/develop")
-async def generate_code_stream(
-    spec: str,
-    provider: str,
-    model: str,
-    api_key: str,
-    workspace_path: str = "./workspace",
-    require_approval: str = "false"
-):
-    set_keys(api_key, provider)
-    
+
+@app.post("/api/develop")
+async def generate_code_stream(req: DevelopRequest):
+    set_keys_from_env()
+    provider = get_current_provider()
+    model = get_current_model()
+    workspace_path = validate_workspace_path(req.workspace_path)
+    require_approval = req.require_approval
+    spec = req.spec
+
     # Reset the abort event before starting a new run
     abort_event.clear()
-    approval_settings["require"] = require_approval.lower() == "true"
-    
+    approval_settings["require"] = require_approval
+
     q = queue.Queue()
 
     class StreamCatcher:
         """Captures CrewAI stdout, parses ReAct patterns, and emits typed SSE events."""
+
         def __init__(self):
             self.buffer = ""
-            
+
         def write(self, text):
             if not text or not text.strip():
                 return
-            
+
             clean = _strip_ansi(text)
             if not clean:
                 return
-            
+
             # --- Detect CrewAI ReAct patterns ---
-            
+
             # Agent start / delegation header
             if clean.startswith("Agent:") or clean.startswith("## Agent:"):
                 _emit(q, "system", {"text": clean, "level": "info"})
                 return
-            
+
             # Task header
             if clean.startswith("Task:") or clean.startswith("## Task:"):
                 _emit(q, "system", {"text": clean, "level": "info"})
                 return
-            
+
             # Agent thinking / reasoning
             if clean.startswith("Thought:") or clean.startswith("> Thinking:"):
                 thought_text = clean.split(":", 1)[1].strip() if ":" in clean else clean
@@ -316,23 +483,27 @@ async def generate_code_stream(
                 tool_name = clean.split(":", 1)[1].strip() if ":" in clean else clean
                 _emit(q, "tool_call", {"tool": tool_name, "input": ""})
                 return
-            
+
             if clean.startswith("Action Input:"):
                 action_input = clean.split(":", 1)[1].strip() if ":" in clean else clean
                 _emit(q, "tool_input", {"input": action_input})
                 return
 
             # Tool result / observation — parse structured markers from our tools
-            if clean.startswith("Observation:") or "Tool" in clean and "executed with result" in clean:
+            if (
+                clean.startswith("Observation:")
+                or "Tool" in clean
+                and "executed with result" in clean
+            ):
                 self._emit_tool_result(clean)
                 return
-            
+
             # Final answer
             if clean.startswith("Final Answer:"):
                 answer_text = clean.split(":", 1)[1].strip() if ":" in clean else clean
                 _emit(q, "final_answer", {"text": answer_text})
                 return
-            
+
             # System messages from our own code
             if clean.startswith("[SYSTEM]"):
                 level = "info"
@@ -342,7 +513,7 @@ async def generate_code_stream(
                     level = "error"
                 _emit(q, "system", {"text": clean, "level": level})
                 return
-            
+
             # Everything else — send as raw log
             _emit(q, "log", {"text": clean})
 
@@ -351,7 +522,7 @@ async def generate_code_stream(
             result_text = text
             if ":" in text:
                 result_text = text.split(":", 1)[1].strip()
-            
+
             # Extract structured markers from our TerminalExecutionTool output
             cwd = ""
             cmd = ""
@@ -359,59 +530,82 @@ async def generate_code_stream(
             stderr = ""
             exit_code = None
             success = True
-            
+
             if "[CWD]" in result_text:
                 parts = result_text
-                cwd_match = _re.search(r'\[CWD\]\s*(.+?)(?:\n|\[CMD\]|$)', parts)
-                cmd_match = _re.search(r'\[CMD\]\s*(.+?)(?:\n|\[STDOUT\]|\[STDERR\]|\[EXIT\]|$)', parts)
-                stdout_match = _re.search(r'\[STDOUT\]\s*\n?(.*?)(?:\[STDERR\]|\[EXIT\]|$)', parts, _re.DOTALL)
-                stderr_match = _re.search(r'\[STDERR\]\s*\n?(.*?)(?:\[EXIT\]|$)', parts, _re.DOTALL)
-                exit_match = _re.search(r'\[EXIT\]\s*(\d+)', parts)
-                
-                if cwd_match: cwd = cwd_match.group(1).strip()
-                if cmd_match: cmd = cmd_match.group(1).strip()
-                if stdout_match: stdout = stdout_match.group(1).strip()
-                if stderr_match: stderr = stderr_match.group(1).strip()
-                if exit_match: exit_code = int(exit_match.group(1))
-                
+                cwd_match = _re.search(r"\[CWD\]\s*(.+?)(?:\n|\[CMD\]|$)", parts)
+                cmd_match = _re.search(
+                    r"\[CMD\]\s*(.+?)(?:\n|\[STDOUT\]|\[STDERR\]|\[EXIT\]|$)", parts
+                )
+                stdout_match = _re.search(
+                    r"\[STDOUT\]\s*\n?(.*?)(?:\[STDERR\]|\[EXIT\]|$)", parts, _re.DOTALL
+                )
+                stderr_match = _re.search(
+                    r"\[STDERR\]\s*\n?(.*?)(?:\[EXIT\]|$)", parts, _re.DOTALL
+                )
+                exit_match = _re.search(r"\[EXIT\]\s*(\d+)", parts)
+
+                if cwd_match:
+                    cwd = cwd_match.group(1).strip()
+                if cmd_match:
+                    cmd = cmd_match.group(1).strip()
+                if stdout_match:
+                    stdout = stdout_match.group(1).strip()
+                if stderr_match:
+                    stderr = stderr_match.group(1).strip()
+                if exit_match:
+                    exit_code = int(exit_match.group(1))
+
                 success = "[SUCCESS]" in result_text or exit_code == 0
-                
-                _emit(q, "tool_result", {
-                    "tool": "terminal",
-                    "cwd": cwd,
-                    "cmd": cmd,
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "exit_code": exit_code,
-                    "success": success,
-                    "raw": ""
-                })
+
+                _emit(
+                    q,
+                    "tool_result",
+                    {
+                        "tool": "terminal",
+                        "cwd": cwd,
+                        "cmd": cmd,
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "exit_code": exit_code,
+                        "success": success,
+                        "raw": "",
+                    },
+                )
             elif "WRITE_FILE" in result_text or "File written" in result_text:
                 success = "[SUCCESS]" in result_text
-                _emit(q, "tool_result", {
-                    "tool": "write_file",
-                    "cwd": "",
-                    "cmd": "",
-                    "stdout": result_text,
-                    "stderr": "",
-                    "exit_code": 0 if success else 1,
-                    "success": success,
-                    "raw": ""
-                })
+                _emit(
+                    q,
+                    "tool_result",
+                    {
+                        "tool": "write_file",
+                        "cwd": "",
+                        "cmd": "",
+                        "stdout": result_text,
+                        "stderr": "",
+                        "exit_code": 0 if success else 1,
+                        "success": success,
+                        "raw": "",
+                    },
+                )
             else:
                 # Generic tool result
                 success = "[FAILED]" not in result_text and "Error" not in result_text
-                _emit(q, "tool_result", {
-                    "tool": "unknown",
-                    "cwd": "",
-                    "cmd": "",
-                    "stdout": result_text,
-                    "stderr": "",
-                    "exit_code": 0 if success else 1,
-                    "success": success,
-                    "raw": result_text
-                })
-                
+                _emit(
+                    q,
+                    "tool_result",
+                    {
+                        "tool": "unknown",
+                        "cwd": "",
+                        "cmd": "",
+                        "stdout": result_text,
+                        "stderr": "",
+                        "exit_code": 0 if success else 1,
+                        "success": success,
+                        "raw": result_text,
+                    },
+                )
+
         def flush(self):
             pass
 
@@ -423,22 +617,30 @@ async def generate_code_stream(
         old_stdout = sys.stdout
         sys.stdout = StreamCatcher()
         try:
-            _emit(q, "system", {"text": "Initializing Developer Agent...", "level": "info"})
-            
+            _emit(
+                q,
+                "system",
+                {"text": "Initializing Developer Agent...", "level": "info"},
+            )
+
             def raw_approval_callback(command: str) -> tuple[bool, str | None]:
                 # Notify frontend that an action needs approval
-                q.put(f"event: action_required\ndata: {_json.dumps({'command': command})}\n\n")
-                
+                q.put(
+                    f"event: action_required\ndata: {_json.dumps({'command': command})}\n\n"
+                )
+
                 # Clear the event and wait for the user to hit the approve/reject endpoint
                 approval_state["event"].clear()
-                
+
                 # Wait loop so we can still bail quickly if STOP is hit
                 while not approval_state["event"].is_set() and not abort_event.is_set():
                     approval_state["event"].wait(0.5)
-                
+
                 if abort_event.is_set():
-                    raise InterruptedError("User triggered manual stop while waiting for approval.")
-                    
+                    raise InterruptedError(
+                        "User triggered manual stop while waiting for approval."
+                    )
+
                 return (approval_state["approved"], approval_state.get("feedback"))
 
             def approval_callback(command: str) -> tuple[bool, str | None]:
@@ -455,45 +657,52 @@ async def generate_code_stream(
                     _emit(q, "cmd_end", data)
                 elif event_type in ("stdout", "stderr"):
                     _emit(q, "cmd_output", {"stream": event_type, "line": data})
-            
+
             terminal_tool = TerminalExecutionTool(
                 workspace_path=workspace_path,
-                require_approval=(require_approval.lower() == "true"),
+                require_approval=require_approval,
                 approval_callback=approval_callback,
-                stream_callback=stream_callback
+                stream_callback=stream_callback,
             )
-            
+
             write_file_tool = WriteFileTool(
                 workspace_path=workspace_path,
-                require_approval=(require_approval.lower() == "true"),
-                approval_callback=approval_callback
+                require_approval=require_approval,
+                approval_callback=approval_callback,
             )
-            
+
             read_file_tool = ReadFileTool(workspace_path=workspace_path)
-            
+
             replace_in_file_tool = ReplaceInFileTool(
                 workspace_path=workspace_path,
-                require_approval=(require_approval.lower() == "true"),
-                approval_callback=approval_callback
+                require_approval=require_approval,
+                approval_callback=approval_callback,
             )
-            
+
             edit_file_lines_tool = EditFileLinesTool(
                 workspace_path=workspace_path,
-                require_approval=(require_approval.lower() == "true"),
-                approval_callback=approval_callback
+                require_approval=require_approval,
+                approval_callback=approval_callback,
             )
-            
+
             insert_at_line_tool = InsertAtLineTool(
                 workspace_path=workspace_path,
-                require_approval=(require_approval.lower() == "true"),
-                approval_callback=approval_callback
+                require_approval=require_approval,
+                approval_callback=approval_callback,
             )
-            
+
             report_status_tool = ReportTaskStatusTool(result_holder=task_status)
-            
+
             def check_abort(step_output):
                 if abort_event.is_set():
-                    _emit(q, "system", {"text": "Abort signal received. Terminating...", "level": "warn"})
+                    _emit(
+                        q,
+                        "system",
+                        {
+                            "text": "Abort signal received. Terminating...",
+                            "level": "warn",
+                        },
+                    )
                     raise InterruptedError("User triggered manual stop.")
                 # Track tool failures from step output
                 output_str = str(step_output) if step_output else ""
@@ -501,28 +710,38 @@ async def generate_code_stream(
                     error_count[0] += 1
 
             developer = Agent(
-                role='Autonomous Principal Developer',
-                goal='Build and execute the provided application spec directly in the filesystem.',
-                backstory="You are a 10x systems engineer who builds applications entirely using the terminal. ENVIRONMENT: You are on Windows (cmd/PowerShell) — use Windows commands (dir, mkdir, del, copy, type) NOT Unix commands (ls, rm, cp, cat). NEVER run recursive directory listings like 'dir /s' or 'tree' — they dump thousands of files from node_modules and are useless. Use 'dir' (without /s) to see just the top-level contents of a folder. IMPORTANT: Before doing ANYTHING else, you MUST create a dedicated project folder inside the workspace (e.g. 'mkdir my-app-name') and do ALL your work inside that folder. This keeps the workspace clean when multiple projects exist. When scaffolding projects with npx, npm, or any CLI tools, ALWAYS use non-interactive flags (e.g. 'npx -y create-next-app@latest ./my-app --yes --typescript --eslint --tailwind --app --src-dir --no-import-alias', 'npm init -y', 'npx -y create-vite@latest ./my-app -- --template react-ts'). NEVER run interactive prompts — they will hang and timeout. You use your Execute Terminal Command tool to create directories, install dependencies, and run scripts. You ALWAYS use your Write File tool to save NEW source code into files. Do NOT use echo or cat to write long blocks of code into files, use Write File instead. When you need to EDIT an existing file, ALWAYS use Read File first to see the current content and line numbers. For targeted edits, use Edit File Lines (to replace a specific line range) or Insert At Line (to add code at a specific position). Use Replace In File if you have a unique text snippet to match. Never rewrite a whole file just to change a few lines. IMPORTANT: Before giving your Final Answer, you MUST call the 'Report Task Status' tool to indicate whether the task succeeded, failed, or partially completed.",
+                role="Autonomous Principal Developer",
+                goal="Build and execute the provided application spec directly in the filesystem.",
+                backstory="You are a 10x systems engineer who builds applications entirely using the terminal. ENVIRONMENT: You are on Windows (cmd/PowerShell) — use Windows commands (dir, mkdir, del, copy, type) NOT Unix commands (ls, rm, cp, cat). NEVER run recursive directory listings like 'dir /s' or 'tree' — they dump thousands of files from node_modules and are useless. Use 'dir' (without /s) to see just the top-level contents of a folder. IMPORTANT: Before doing ANYTHING else, you MUST create a dedicated project folder inside the workspace (e.g. 'mkdir my-app-name') and do ALL your work inside that folder. This keeps the workspace clean when multiple projects exist. When scaffolding projects with npx, npm, or any CLI tools, ALWAYS use non-interactive flags (e.g. 'npx -y create-next-app@latest ./my-app --yes --typescript --eslint --tailwind --app --src-dir --no-import-alias', 'npm init -y', 'npx -y create-vite@latest ./my-app -- --template react-ts'). NEVER run interactive prompts — they will hang and timeout. You use your Execute Terminal Command tool to create directories, install dependencies, and run scripts. You ALWAYS use your Write File tool to save NEW source code into files. Do NOT use echo or cat to write long blocks of code into files, use Write File instead. When you need to EDIT an existing file, ALWAYS use Read File first to see the current content and line numbers. For targeted edits, use Edit File Lines (to replace a specific line range) or Insert At Line (to add code at a specific position). Use Replace In File if you have a unique text snippet to match. Never rewrite a whole file just to change a few lines. PRE-COMPLETION VERIFICATION: Before giving your Final Answer, you MUST test-run the application to verify it works. Start the app (e.g. 'npm run dev', 'npm start', 'python app.py', etc.) with a short timeout (10-15 seconds) and check the output for compilation errors, crashes, or missing dependencies. If you find errors, fix them and test again. Once verified, kill the dev server process (use Ctrl+C, taskkill, or just let the timeout end) before proceeding. IMPORTANT: After verification, you MUST call the 'Report Task Status' tool to indicate whether the task succeeded, failed, or partially completed.",
                 verbose=True,
                 allow_delegation=False,
                 max_iter=75,
                 llm=get_llm(model, provider),
-                tools=[terminal_tool, write_file_tool, read_file_tool, replace_in_file_tool, edit_file_lines_tool, insert_at_line_tool, report_status_tool],
-                step_callback=check_abort
+                tools=[
+                    terminal_tool,
+                    write_file_tool,
+                    read_file_tool,
+                    replace_in_file_tool,
+                    edit_file_lines_tool,
+                    insert_at_line_tool,
+                    report_status_tool,
+                ],
+                step_callback=check_abort,
             )
-            
+
             dev_task = Task(
-                description=f'Read this approved spec. FIRST, create a dedicated project folder inside the workspace directory (name it based on the app name from the spec). Then build everything inside that folder. Execute terminal commands to build the file structure and write the code locally:\n\n{spec}',
-                expected_output='A completely built and installed application within the workspace.', 
-                agent=developer
+                description=f"Read this approved spec. FIRST, create a dedicated project folder inside the workspace directory (name it based on the app name from the spec). Then build everything inside that folder. Execute terminal commands to build the file structure and write the code locally:\n\n{spec}",
+                expected_output="A completely built and installed application within the workspace.",
+                agent=developer,
             )
-            
+
             crew = Crew(agents=[developer], tasks=[dev_task])
             crew_result = crew.kickoff()
-            
+
             # Emit the final crew result as a dedicated event for the result panel
-            raw_result = crew_result.raw if hasattr(crew_result, 'raw') else str(crew_result)
+            raw_result = (
+                crew_result.raw if hasattr(crew_result, "raw") else str(crew_result)
+            )
             if raw_result and raw_result.strip():
                 _emit(q, "result", {"text": raw_result})
         except InterruptedError as e:
@@ -544,7 +763,9 @@ async def generate_code_stream(
                 final_status = "partial"
             else:
                 final_status = "success"
-            q.put(f"event: done\ndata: {_json.dumps({'killed': killed, 'error': errored, 'status': final_status, 'status_summary': task_status.get('summary', '')})}\n\n")
+            q.put(
+                f"event: done\ndata: {_json.dumps({'killed': killed, 'error': errored, 'status': final_status, 'status_summary': task_status.get('summary', '')})}\n\n"
+            )
 
     threading.Thread(target=run_crew).start()
 
@@ -557,46 +778,46 @@ async def generate_code_stream(
                 if "event: done" in item:
                     break
                 if abort_event.is_set():
-                     _emit(q, "system", {"text": "Stream closed.", "level": "warn"})
-                     yield f"event: done\ndata: {_json.dumps({'killed': True})}\n\n"
-                     break
+                    _emit(q, "system", {"text": "Stream closed.", "level": "warn"})
+                    yield f"event: done\ndata: {_json.dumps({'killed': True})}\n\n"
+                    break
             except queue.Empty:
                 yield ": keepalive\n\n"
                 await asyncio.sleep(0.5)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
-@app.get("/api/dev-iterate")
-async def dev_iterate(
-    task: str = "",
-    spec: str = "",
-    dev_context: str = "",
-    workspace_path: str = "./workspace",
-    provider: str = "Google (Gemini)",
-    model: str = "gemini-2.5-flash-preview-05-20",
-    api_key: str = "",
-    require_approval: str = "false"
-):
+
+@app.post("/api/dev-iterate")
+async def dev_iterate(req: IterateRequest):
     """SSE endpoint for iterative development — agent executes changes based on user instructions."""
-    set_keys(api_key, provider)
+    set_keys_from_env()
+    provider = get_current_provider()
+    model = get_current_model()
+    workspace_path = validate_workspace_path(req.workspace_path)
+    require_approval = req.require_approval
+    task = req.task
+    spec = req.spec
+    dev_context = req.dev_context
+
     abort_event.clear()
-    approval_settings["require"] = require_approval.lower() == "true"
-    
+    approval_settings["require"] = require_approval
+
     q = queue.Queue()
 
     # Reuse the same StreamCatcher for parsing CrewAI ReAct output
     class StreamCatcher:
         def __init__(self):
             self.buffer = ""
-            
+
         def write(self, text):
             if not text or not text.strip():
                 return
-            
+
             clean = _strip_ansi(text)
             if not clean:
                 return
-            
+
             if clean.startswith("Agent:") or clean.startswith("## Agent:"):
                 _emit(q, "system", {"text": clean, "level": "info"})
                 return
@@ -617,54 +838,81 @@ async def dev_iterate(
                 return
             if clean.startswith("Observation:") or clean.startswith("Tool Result:"):
                 result_text = clean.split(":", 1)[1].strip() if ":" in clean else clean
-                
+
                 cwd = ""
                 cmd = ""
                 stdout = ""
                 stderr = ""
                 exit_code = None
                 success = True
-                
+
                 if "[CWD]" in result_text:
                     parts = result_text
-                    cwd_match = _re.search(r'\[CWD\]\s*(.+?)(?:\n|\[CMD\]|$)', parts)
-                    cmd_match = _re.search(r'\[CMD\]\s*(.+?)(?:\n|\[STDOUT\]|\[STDERR\]|\[EXIT\]|$)', parts)
-                    stdout_match = _re.search(r'\[STDOUT\]\s*\n?(.*?)(?:\[STDERR\]|\[EXIT\]|$)', parts, _re.DOTALL)
-                    stderr_match = _re.search(r'\[STDERR\]\s*\n?(.*?)(?:\[EXIT\]|$)', parts, _re.DOTALL)
-                    exit_match = _re.search(r'\[EXIT\]\s*(\d+)', parts)
-                    
-                    if cwd_match: cwd = cwd_match.group(1).strip()
-                    if cmd_match: cmd = cmd_match.group(1).strip()
-                    if stdout_match: stdout = stdout_match.group(1).strip()
-                    if stderr_match: stderr = stderr_match.group(1).strip()
-                    if exit_match: exit_code = int(exit_match.group(1))
-                    
+                    cwd_match = _re.search(r"\[CWD\]\s*(.+?)(?:\n|\[CMD\]|$)", parts)
+                    cmd_match = _re.search(
+                        r"\[CMD\]\s*(.+?)(?:\n|\[STDOUT\]|\[STDERR\]|\[EXIT\]|$)", parts
+                    )
+                    stdout_match = _re.search(
+                        r"\[STDOUT\]\s*\n?(.*?)(?:\[STDERR\]|\[EXIT\]|$)",
+                        parts,
+                        _re.DOTALL,
+                    )
+                    stderr_match = _re.search(
+                        r"\[STDERR\]\s*\n?(.*?)(?:\[EXIT\]|$)", parts, _re.DOTALL
+                    )
+                    exit_match = _re.search(r"\[EXIT\]\s*(\d+)", parts)
+
+                    if cwd_match:
+                        cwd = cwd_match.group(1).strip()
+                    if cmd_match:
+                        cmd = cmd_match.group(1).strip()
+                    if stdout_match:
+                        stdout = stdout_match.group(1).strip()
+                    if stderr_match:
+                        stderr = stderr_match.group(1).strip()
+                    if exit_match:
+                        exit_code = int(exit_match.group(1))
+
                     success = "[SUCCESS]" in result_text or exit_code == 0
-                    
-                    _emit(q, "tool_result", {
-                        "tool": "terminal",
-                        "cwd": cwd, "cmd": cmd,
-                        "stdout": stdout, "stderr": stderr,
-                        "exit_code": exit_code, "success": success,
-                        "raw": result_text[:500]
-                    })
+
+                    _emit(
+                        q,
+                        "tool_result",
+                        {
+                            "tool": "terminal",
+                            "cwd": cwd,
+                            "cmd": cmd,
+                            "stdout": stdout,
+                            "stderr": stderr,
+                            "exit_code": exit_code,
+                            "success": success,
+                            "raw": result_text[:500],
+                        },
+                    )
                 else:
-                    _emit(q, "tool_result", {
-                        "tool": "file_op",
-                        "cwd": "", "cmd": "",
-                        "stdout": result_text[:500], "stderr": "",
-                        "exit_code": 0, "success": "[SUCCESS]" in result_text,
-                        "raw": result_text[:500]
-                    })
+                    _emit(
+                        q,
+                        "tool_result",
+                        {
+                            "tool": "file_op",
+                            "cwd": "",
+                            "cmd": "",
+                            "stdout": result_text[:500],
+                            "stderr": "",
+                            "exit_code": 0,
+                            "success": "[SUCCESS]" in result_text,
+                            "raw": result_text[:500],
+                        },
+                    )
                 return
-            
+
             if clean.startswith("Final Answer:"):
                 answer_text = clean.split(":", 1)[1].strip() if ":" in clean else clean
                 _emit(q, "final_answer", {"text": answer_text})
                 return
-            
+
             _emit(q, "log", {"text": clean})
-                
+
         def flush(self):
             pass
 
@@ -676,15 +924,23 @@ async def dev_iterate(
         old_stdout = sys.stdout
         sys.stdout = StreamCatcher()
         try:
-            _emit(q, "system", {"text": "Initializing Iteration Agent...", "level": "info"})
-            
+            _emit(
+                q,
+                "system",
+                {"text": "Initializing Iteration Agent...", "level": "info"},
+            )
+
             def raw_approval_callback(command: str) -> tuple[bool, str | None]:
-                q.put(f"event: action_required\ndata: {_json.dumps({'command': command})}\n\n")
+                q.put(
+                    f"event: action_required\ndata: {_json.dumps({'command': command})}\n\n"
+                )
                 approval_state["event"].clear()
                 while not approval_state["event"].is_set() and not abort_event.is_set():
                     approval_state["event"].wait(0.5)
                 if abort_event.is_set():
-                    raise InterruptedError("User triggered manual stop while waiting for approval.")
+                    raise InterruptedError(
+                        "User triggered manual stop while waiting for approval."
+                    )
                 return (approval_state["approved"], approval_state.get("feedback"))
 
             def approval_callback(command: str) -> tuple[bool, str | None]:
@@ -700,71 +956,88 @@ async def dev_iterate(
                     _emit(q, "cmd_end", data)
                 elif event_type in ("stdout", "stderr"):
                     _emit(q, "cmd_output", {"stream": event_type, "line": data})
-            
+
             terminal_tool = TerminalExecutionTool(
                 workspace_path=workspace_path,
-                require_approval=(require_approval.lower() == "true"),
+                require_approval=require_approval,
                 approval_callback=approval_callback,
-                stream_callback=stream_callback
+                stream_callback=stream_callback,
             )
             write_file_tool = WriteFileTool(
                 workspace_path=workspace_path,
-                require_approval=(require_approval.lower() == "true"),
-                approval_callback=approval_callback
+                require_approval=require_approval,
+                approval_callback=approval_callback,
             )
             read_file_tool = ReadFileTool(workspace_path=workspace_path)
             replace_in_file_tool = ReplaceInFileTool(
                 workspace_path=workspace_path,
-                require_approval=(require_approval.lower() == "true"),
-                approval_callback=approval_callback
+                require_approval=require_approval,
+                approval_callback=approval_callback,
             )
             edit_file_lines_tool = EditFileLinesTool(
                 workspace_path=workspace_path,
-                require_approval=(require_approval.lower() == "true"),
-                approval_callback=approval_callback
+                require_approval=require_approval,
+                approval_callback=approval_callback,
             )
             insert_at_line_tool = InsertAtLineTool(
                 workspace_path=workspace_path,
-                require_approval=(require_approval.lower() == "true"),
-                approval_callback=approval_callback
+                require_approval=require_approval,
+                approval_callback=approval_callback,
             )
-            
+
             report_status_tool = ReportTaskStatusTool(result_holder=task_status)
-            
+
             def check_abort(step_output):
                 if abort_event.is_set():
-                    _emit(q, "system", {"text": "Abort signal received. Terminating...", "level": "warn"})
+                    _emit(
+                        q,
+                        "system",
+                        {
+                            "text": "Abort signal received. Terminating...",
+                            "level": "warn",
+                        },
+                    )
                     raise InterruptedError("User triggered manual stop.")
                 output_str = str(step_output) if step_output else ""
                 if "[FAILED]" in output_str or "[DENIED]" in output_str:
                     error_count[0] += 1
 
             iterator = Agent(
-                role='Iterative Developer',
-                goal='Apply the requested changes to the existing project.',
-                backstory="You are iterating on an existing project. ENVIRONMENT: You are on Windows (cmd/PowerShell) — use Windows commands (dir, mkdir, del, copy, type) NOT Unix commands (ls, rm, cp, cat). NEVER run recursive directory listings like 'dir /s' or 'tree' — they dump thousands of files from node_modules and are useless. Use 'dir' (without /s) to see just the top-level contents of a folder. The project was built according to a spec and already exists in the workspace. Your job is to make the specific changes the user requested. ALWAYS use Read File first to understand the current state of relevant files before making edits. For targeted edits, use Edit File Lines (to replace a specific line range) or Insert At Line (to add code at a specific position). Use Replace In File if you have a unique text snippet to match. Use Write File only for creating new files. Use the terminal for installing dependencies, running builds, or testing. Never rewrite a whole file just to change a few lines. IMPORTANT: Before giving your Final Answer, you MUST call the 'Report Task Status' tool to indicate whether the task succeeded, failed, or partially completed.",
+                role="Iterative Developer",
+                goal="Apply the requested changes to the existing project.",
+                backstory="You are iterating on an existing project. ENVIRONMENT: You are on Windows (cmd/PowerShell) — use Windows commands (dir, mkdir, del, copy, type) NOT Unix commands (ls, rm, cp, cat). NEVER run recursive directory listings like 'dir /s' or 'tree' — they dump thousands of files from node_modules and are useless. Use 'dir' (without /s) to see just the top-level contents of a folder. The project was built according to a spec and already exists in the workspace. Your job is to make the specific changes the user requested. ALWAYS use Read File first to understand the current state of relevant files before making edits. For targeted edits, use Edit File Lines (to replace a specific line range) or Insert At Line (to add code at a specific position). Use Replace In File if you have a unique text snippet to match. Use Write File only for creating new files. Use the terminal for installing dependencies, running builds, or testing. Never rewrite a whole file just to change a few lines. PRE-COMPLETION VERIFICATION: Before giving your Final Answer, you MUST test-run the application to verify your changes work. Start the app (e.g. 'npm run dev', 'npm start', 'python app.py', etc.) with a short timeout (10-15 seconds) and check the output for compilation errors, crashes, or missing dependencies. If you find errors, fix them and test again. Once verified, kill the dev server process (use Ctrl+C, taskkill, or just let the timeout end) before proceeding. IMPORTANT: After verification, you MUST call the 'Report Task Status' tool to indicate whether the task succeeded, failed, or partially completed.",
                 verbose=True,
                 allow_delegation=False,
                 max_iter=50,
                 llm=get_llm(model, provider),
-                tools=[terminal_tool, write_file_tool, read_file_tool, replace_in_file_tool, edit_file_lines_tool, insert_at_line_tool, report_status_tool],
-                step_callback=check_abort
+                tools=[
+                    terminal_tool,
+                    write_file_tool,
+                    read_file_tool,
+                    replace_in_file_tool,
+                    edit_file_lines_tool,
+                    insert_at_line_tool,
+                    report_status_tool,
+                ],
+                step_callback=check_abort,
             )
-            
+
             context_section = ""
             if dev_context:
                 context_section = f"\n\n--- Previous Build Summary ---\nThe initial development agent produced this summary of what was built. Use this to know what files exist and where — do NOT re-read every file. Only read the specific files you need to modify.\n\n{dev_context}\n"
-            
+
             iterate_task = Task(
-                description=f'The user has requested the following change to the existing project:\n\n{task}\n\nFor context, here is the project spec:\n\n{spec}{context_section}\n\nOnly read the files you need to change — do NOT explore the entire project. Make the changes and verify they work.',
-                expected_output='A summary of what was changed and any relevant details.',
-                agent=iterator
+                description=f"The user has requested the following change to the existing project:\n\n{task}\n\nFor context, here is the project spec:\n\n{spec}{context_section}\n\nOnly read the files you need to change — do NOT explore the entire project. Make the changes and verify they work.",
+                expected_output="A summary of what was changed and any relevant details.",
+                agent=iterator,
             )
-            
+
             crew = Crew(agents=[iterator], tasks=[iterate_task])
             crew_result = crew.kickoff()
-            
-            raw_result = crew_result.raw if hasattr(crew_result, 'raw') else str(crew_result)
+
+            raw_result = (
+                crew_result.raw if hasattr(crew_result, "raw") else str(crew_result)
+            )
             if raw_result and raw_result.strip():
                 _emit(q, "result", {"text": raw_result})
         except InterruptedError as e:
@@ -772,7 +1045,9 @@ async def dev_iterate(
             _emit(q, "system", {"text": f"Process stopped: {str(e)}", "level": "warn"})
         except Exception as e:
             errored = True
-            _emit(q, "system", {"text": f"Iteration failure: {str(e)}", "level": "error"})
+            _emit(
+                q, "system", {"text": f"Iteration failure: {str(e)}", "level": "error"}
+            )
         finally:
             sys.stdout = old_stdout
             if task_status.get("status"):
@@ -785,7 +1060,9 @@ async def dev_iterate(
                 final_status = "partial"
             else:
                 final_status = "success"
-            q.put(f"event: done\ndata: {_json.dumps({'killed': killed, 'error': errored, 'status': final_status, 'status_summary': task_status.get('summary', '')})}\n\n")
+            q.put(
+                f"event: done\ndata: {_json.dumps({'killed': killed, 'error': errored, 'status': final_status, 'status_summary': task_status.get('summary', '')})}\n\n"
+            )
 
     threading.Thread(target=run_iterate).start()
 
@@ -798,14 +1075,15 @@ async def dev_iterate(
                 if "event: done" in item:
                     break
                 if abort_event.is_set():
-                     _emit(q, "system", {"text": "Stream closed.", "level": "warn"})
-                     yield f"event: done\ndata: {_json.dumps({'killed': True})}\n\n"
-                     break
+                    _emit(q, "system", {"text": "Stream closed.", "level": "warn"})
+                    yield f"event: done\ndata: {_json.dumps({'killed': True})}\n\n"
+                    break
             except queue.Empty:
                 yield ": keepalive\n\n"
                 await asyncio.sleep(0.5)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
 
 @app.post("/api/develop/stop")
 async def stop_development():
@@ -813,12 +1091,14 @@ async def stop_development():
     abort_event.set()
     return {"status": "Abort signal sent."}
 
+
 @app.post("/api/develop/approve")
 async def approve_action(req: ApproveRequest):
     approval_state["approved"] = req.approved
     approval_state["feedback"] = req.feedback
     approval_state["event"].set()
     return {"status": "Action approval processed."}
+
 
 @app.post("/api/develop/toggle-approval")
 async def toggle_approval(require: bool):
@@ -831,7 +1111,9 @@ async def toggle_approval(require: bool):
         approval_state["event"].set()
     return {"status": f"Approval requirement set to {require}"}
 
+
 if __name__ == "__main__":
     import uvicorn
+
     # To run: python main.py
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000)

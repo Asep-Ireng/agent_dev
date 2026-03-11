@@ -2,14 +2,42 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Sparkles, Code2, Settings2, Box, Loader2, Paperclip, Send, TerminalSquare, AlertTriangle, XCircle, CheckCircle, ChevronDown, ChevronRight, ChevronUp, FileCode2, Brain, Terminal } from "lucide-react";
+import {
+  Sparkles,
+  Code2,
+  Settings2,
+  Box,
+  Loader2,
+  Paperclip,
+  Send,
+  TerminalSquare,
+  AlertTriangle,
+  XCircle,
+  CheckCircle,
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  FileCode2,
+  Brain,
+  Terminal,
+} from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
 type LogEntry =
   | { type: "thought"; text: string }
   | { type: "tool_call"; tool: string; input: string }
   | { type: "tool_input"; input: string }
-  | { type: "tool_result"; tool: string; cwd: string; cmd: string; stdout: string; stderr: string; exit_code: number | null; success: boolean; raw: string }
+  | {
+      type: "tool_result";
+      tool: string;
+      cwd: string;
+      cmd: string;
+      stdout: string;
+      stderr: string;
+      exit_code: number | null;
+      success: boolean;
+      raw: string;
+    }
   | { type: "final_answer"; text: string }
   | { type: "system"; text: string; level: "info" | "warn" | "error" }
   | { type: "log"; text: string }
@@ -18,36 +46,37 @@ type LogEntry =
   | { type: "cmd_end"; exit_code: number; success: boolean };
 
 export default function Home() {
-  const [provider, setProvider] = useState(process.env.NEXT_PUBLIC_DEFAULT_PROVIDER || "Google (Gemini)");
-  
-  const defaultGoogleKey = process.env.NEXT_PUBLIC_GOOGLE_API_KEY || "";
-  const defaultOpenAIKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY || "";
-  const [apiKey, setApiKey] = useState(provider === "OpenAI" ? defaultOpenAIKey : defaultGoogleKey);
-  
-  const defaultGoogleModel = process.env.NEXT_PUBLIC_GOOGLE_MODEL || "gemini-1.5-pro";
-  const defaultOpenAIModel = process.env.NEXT_PUBLIC_OPENAI_MODEL || "gpt-4o";
-  const [model, setModel] = useState(provider === "OpenAI" ? defaultOpenAIModel : defaultGoogleModel);
-  
-  const [workspacePath, setWorkspacePath] = useState(process.env.NEXT_PUBLIC_WORKSPACE_PATH || "./workspace");
-  
-  const [chatHistory, setChatHistory] = useState<{role: "user" | "agent", content: string}[]>([]);
+  const [provider, setProvider] = useState("Google (Gemini)");
+  const [model, setModel] = useState("gemini-2.5-flash");
+  const [googleModel, setGoogleModel] = useState("gemini-2.5-flash");
+  const [openaiModel, setOpenaiModel] = useState("gpt-4o");
+
+  const [workspacePath, setWorkspacePath] = useState("./workspace");
+
+  const [chatHistory, setChatHistory] = useState<
+    { role: "user" | "agent"; content: string }[]
+  >([]);
   const [currentMessage, setCurrentMessage] = useState("");
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
-  
+
   const [spec, setSpec] = useState("");
   const [code, setCode] = useState("");
   const [specTab, setSpecTab] = useState<"preview" | "edit">("preview");
-  
+
   const [designerLoading, setDesignerLoading] = useState(false);
   const [developerLoading, setDeveloperLoading] = useState(false);
-  
+
   const [actionLogs, setActionLogs] = useState<LogEntry[]>([]);
   const [requireApproval, setRequireApproval] = useState(true);
   const [pendingCommand, setPendingCommand] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState("");
-  const [expandedThoughts, setExpandedThoughts] = useState<Set<number>>(new Set());
+  const [expandedThoughts, setExpandedThoughts] = useState<Set<number>>(
+    new Set(),
+  );
   const [agentResult, setAgentResult] = useState<string>("");
-  const [devChatMessages, setDevChatMessages] = useState<{role: string; content: string}[]>([]);
+  const [devChatMessages, setDevChatMessages] = useState<
+    { role: string; content: string }[]
+  >([]);
   const [devChatInput, setDevChatInput] = useState("");
   const [devChatLoading, setDevChatLoading] = useState(false);
   const [devChatFiles, setDevChatFiles] = useState<File[]>([]);
@@ -55,6 +84,32 @@ export default function Home() {
   const [pendingApplyTask, setPendingApplyTask] = useState<string | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const devChatEndRef = useRef<HTMLDivElement>(null);
+
+  // Fetch settings from backend on mount
+  useEffect(() => {
+    fetch("http://localhost:8000/api/settings")
+      .then((res) => res.json())
+      .then((data) => {
+        setProvider(data.provider);
+        setModel(data.model);
+        setGoogleModel(data.google_model);
+        setOpenaiModel(data.openai_model);
+        if (data.workspace_path) setWorkspacePath(data.workspace_path);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Sync provider/model changes to backend
+  const updateBackendSettings = (newProvider?: string, newModel?: string) => {
+    const body: Record<string, string> = {};
+    if (newProvider !== undefined) body.provider = newProvider;
+    if (newModel !== undefined) body.model = newModel;
+    fetch("http://localhost:8000/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).catch(() => {});
+  };
 
   // Auto-scroll terminal to bottom when new logs arrive
   useEffect(() => {
@@ -67,39 +122,34 @@ export default function Home() {
   }, [devChatMessages]);
 
   const handleChatSubmit = async () => {
-    if (!apiKey) {
-      alert("Please provide an API key in the sidebar.");
-      return;
-    }
     if (!currentMessage.trim() && attachedFiles.length === 0) return;
 
     const userText = currentMessage;
-    setChatHistory(prev => [...prev, { role: "user", content: userText }]);
+    setChatHistory((prev) => [...prev, { role: "user", content: userText }]);
     setCurrentMessage("");
     setDesignerLoading(true);
-    
+
     try {
       const formData = new FormData();
       formData.append("idea", userText);
       formData.append("spec", spec); // send current spec context
-      formData.append("provider", provider);
-      formData.append("model", model);
-      formData.append("api_key", apiKey);
-      attachedFiles.forEach(file => formData.append("files", file));
+      attachedFiles.forEach((file) => formData.append("files", file));
 
       const res = await fetch("http://localhost:8000/api/design/chat", {
         method: "POST",
         body: formData,
       });
-      
+
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "API failed");
-      
+
       setSpec(data.spec);
-      setChatHistory(prev => [...prev, { role: "agent", content: data.summary || "Specification updated." }]);
+      setChatHistory((prev) => [
+        ...prev,
+        { role: "agent", content: data.summary || "Specification updated." },
+      ]);
       setAttachedFiles([]);
       setSpecTab("preview");
-      
     } catch (err: unknown) {
       console.error("Design API Error:", err);
       if (err instanceof Error) {
@@ -113,140 +163,185 @@ export default function Home() {
   };
 
   const addLog = (entry: LogEntry) => {
-    setActionLogs(prev => [...prev, entry]);
+    setActionLogs((prev) => [...prev, entry]);
   };
 
   const handleDevelop = () => {
-    if (!apiKey) {
-      alert("Please provide an API key in the sidebar.");
-      return;
-    }
-    
     setDeveloperLoading(true);
     setActionLogs([]);
     setExpandedThoughts(new Set());
     setAgentResult("");
     setDevChatMessages([]);
     setDevChatInput("");
-    
-    const queryParams = new URLSearchParams({
-      spec: spec,
-      provider: provider,
-      model: model,
-      api_key: apiKey,
-      workspace_path: workspacePath,
-      require_approval: requireApproval.toString()
-    }).toString();
 
-    const eventSource = new EventSource(`http://localhost:8000/api/develop?${queryParams}`);
+    // Helper to parse SSE from a ReadableStream
+    const processSSEStream = async (
+      reader: ReadableStreamDefaultReader<Uint8Array>,
+    ) => {
+      const decoder = new TextDecoder();
+      let buffer = "";
 
-    // --- Typed event listeners ---
-    
-    const handleTypedEvent = (eventType: string) => (event: MessageEvent) => {
-      try {
-        const data = JSON.parse(event.data);
-        switch (eventType) {
-          case "thought":
-            addLog({ type: "thought", text: data.text });
-            break;
-          case "tool_call":
-            addLog({ type: "tool_call", tool: data.tool, input: data.input || "" });
-            break;
-          case "tool_input":
-            addLog({ type: "tool_input", input: data.input });
-            break;
-          case "tool_result":
-            addLog({ type: "tool_result", ...data });
-            break;
-          case "final_answer":
-            addLog({ type: "final_answer", text: data.text });
-            break;
-          case "system":
-            addLog({ type: "system", text: data.text, level: data.level || "info" });
-            break;
-          case "log":
-            addLog({ type: "log", text: data.text });
-            break;
-          case "cmd_start":
-            addLog({ type: "cmd_start", cwd: data.cwd, cmd: data.cmd });
-            break;
-          case "cmd_output":
-            addLog({ type: "cmd_output", stream: data.stream, line: data.line });
-            break;
-          case "cmd_end":
-            addLog({ type: "cmd_end", exit_code: data.exit_code, success: data.success });
-            break;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        let currentEvent = "";
+        for (const line of lines) {
+          if (line.startsWith("event: ")) {
+            currentEvent = line.slice(7).trim();
+          } else if (line.startsWith("data: ")) {
+            const dataStr = line.slice(6);
+            try {
+              const data = JSON.parse(dataStr);
+              handleSSEEvent(currentEvent, data);
+
+              if (currentEvent === "done") {
+                const status =
+                  data.status ||
+                  (data.killed ? "killed" : data.error ? "failed" : "success");
+                const summary = data.status_summary
+                  ? ` — ${data.status_summary}`
+                  : "";
+                switch (status) {
+                  case "killed":
+                    addLog({
+                      type: "system",
+                      text: "Agent stopped by user.",
+                      level: "warn",
+                    });
+                    break;
+                  case "failed":
+                    addLog({
+                      type: "system",
+                      text: `Development failed.${summary}`,
+                      level: "error",
+                    });
+                    break;
+                  case "partial":
+                    addLog({
+                      type: "system",
+                      text: `Development partially completed — some issues occurred.${summary}`,
+                      level: "warn",
+                    });
+                    break;
+                  case "success":
+                  default:
+                    addLog({
+                      type: "system",
+                      text: `Development completed successfully!${summary}`,
+                      level: "info",
+                    });
+                    break;
+                }
+                setPendingCommand(null);
+                setDeveloperLoading(false);
+                return;
+              }
+            } catch (e) {
+              console.error(`Failed to parse ${currentEvent} event:`, e);
+            }
+          }
         }
-      } catch (e) {
-        console.error(`Failed to parse ${eventType} event:`, e);
       }
     };
 
-    eventSource.addEventListener("thought", handleTypedEvent("thought"));
-    eventSource.addEventListener("tool_call", handleTypedEvent("tool_call"));
-    eventSource.addEventListener("tool_input", handleTypedEvent("tool_input"));
-    eventSource.addEventListener("tool_result", handleTypedEvent("tool_result"));
-    eventSource.addEventListener("final_answer", handleTypedEvent("final_answer"));
-    eventSource.addEventListener("system", handleTypedEvent("system"));
-    eventSource.addEventListener("log", handleTypedEvent("log"));
-    eventSource.addEventListener("cmd_start", handleTypedEvent("cmd_start"));
-    eventSource.addEventListener("cmd_output", handleTypedEvent("cmd_output"));
-    eventSource.addEventListener("cmd_end", handleTypedEvent("cmd_end"));
-
-    eventSource.addEventListener("result", (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.text) setAgentResult(data.text);
-      } catch (e) {
-        console.error("Failed to parse result event:", e);
+    // Shared SSE event handler
+    const handleSSEEvent = (
+      eventType: string,
+      data: Record<string, unknown>,
+    ) => {
+      switch (eventType) {
+        case "thought":
+          addLog({ type: "thought", text: data.text as string });
+          break;
+        case "tool_call":
+          addLog({
+            type: "tool_call",
+            tool: data.tool as string,
+            input: (data.input as string) || "",
+          });
+          break;
+        case "tool_input":
+          addLog({ type: "tool_input", input: data.input as string });
+          break;
+        case "tool_result":
+          addLog({
+            type: "tool_result",
+            ...(data as Record<string, unknown>),
+          } as LogEntry);
+          break;
+        case "final_answer":
+          addLog({ type: "final_answer", text: data.text as string });
+          break;
+        case "system":
+          addLog({
+            type: "system",
+            text: data.text as string,
+            level: (data.level as "info" | "warn" | "error") || "info",
+          });
+          break;
+        case "log":
+          addLog({ type: "log", text: data.text as string });
+          break;
+        case "cmd_start":
+          addLog({
+            type: "cmd_start",
+            cwd: data.cwd as string,
+            cmd: data.cmd as string,
+          });
+          break;
+        case "cmd_output":
+          addLog({
+            type: "cmd_output",
+            stream: data.stream as "stdout" | "stderr",
+            line: data.line as string,
+          });
+          break;
+        case "cmd_end":
+          addLog({
+            type: "cmd_end",
+            exit_code: data.exit_code as number,
+            success: data.success as boolean,
+          });
+          break;
+        case "result":
+          if (data.text) setAgentResult(data.text as string);
+          break;
+        case "action_required":
+          setPendingCommand(data.command as string);
+          break;
       }
-    });
-
-    eventSource.addEventListener("action_required", (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        setPendingCommand(data.command);
-      } catch (e) {
-        console.error("Failed to parse action_required data:", e);
-      }
-    });
-
-    eventSource.onerror = (err) => {
-      console.error("EventSource failed:", err);
-      addLog({ type: "system", text: "Connection closed or errored.", level: "error" });
-      setPendingCommand(null);
-      eventSource.close();
-      setDeveloperLoading(false);
     };
 
-    eventSource.addEventListener("done", (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        const status = data.status || (data.killed ? "killed" : data.error ? "failed" : "success");
-        const summary = data.status_summary ? ` — ${data.status_summary}` : "";
-        
-        switch (status) {
-          case "killed":
-            addLog({ type: "system", text: "Agent stopped by user.", level: "warn" });
-            break;
-          case "failed":
-            addLog({ type: "system", text: `Development failed.${summary}`, level: "error" });
-            break;
-          case "partial":
-            addLog({ type: "system", text: `Development partially completed — some issues occurred.${summary}`, level: "warn" });
-            break;
-          case "success":
-          default:
-            addLog({ type: "system", text: `Development completed successfully!${summary}`, level: "info" });
-            break;
-        }
-      } catch {
-        addLog({ type: "system", text: "Development process finished.", level: "info" });
-      }
-      setPendingCommand(null);
-      eventSource.close();
-      setDeveloperLoading(false);
-    });
+    // POST request with SSE response
+    fetch("http://localhost:8000/api/develop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        spec: spec,
+        workspace_path: workspacePath,
+        require_approval: requireApproval,
+      }),
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const reader = res.body!.getReader();
+        return processSSEStream(reader);
+      })
+      .catch((err) => {
+        console.error("Develop stream failed:", err);
+        addLog({
+          type: "system",
+          text: "Connection closed or errored.",
+          level: "error",
+        });
+        setPendingCommand(null);
+        setDeveloperLoading(false);
+      });
   };
 
   const handleStopDevelop = async () => {
@@ -260,46 +355,62 @@ export default function Home() {
 
   const handleDevChat = async () => {
     if (!devChatInput.trim() || devChatLoading) return;
-    
+
     const userMessage = devChatInput.trim();
     const filesToSend = [...devChatFiles];
     setDevChatInput("");
     setDevChatFiles([]);
-    
+
     const modeLabel = devChatMode === "apply" ? "🔧" : "💬";
-    const displayText = filesToSend.length > 0 
-      ? `${modeLabel} ${userMessage} [📎 ${filesToSend.length} file${filesToSend.length > 1 ? 's' : ''}]`
-      : `${modeLabel} ${userMessage}`;
-    setDevChatMessages(prev => [...prev, { role: "user", content: displayText }]);
+    const displayText =
+      filesToSend.length > 0
+        ? `${modeLabel} ${userMessage} [📎 ${filesToSend.length} file${filesToSend.length > 1 ? "s" : ""}]`
+        : `${modeLabel} ${userMessage}`;
+    setDevChatMessages((prev) => [
+      ...prev,
+      { role: "user", content: displayText },
+    ]);
     setDevChatLoading(true);
-    
+
     if (devChatMode === "apply") {
       // Apply mode — Step 1: Get a plan from litellm first
       try {
         const formData = new FormData();
-        formData.append("message", `The user wants you to make the following change:\n\n"${userMessage}"\n\nCreate a brief, specific plan of what you will do. List the files you will read, modify, or create, and describe the changes concisely. Do NOT execute anything yet — just describe the plan.`);
+        formData.append(
+          "message",
+          `The user wants you to make the following change:\n\n"${userMessage}"\n\nCreate a brief, specific plan of what you will do. List the files you will read, modify, or create, and describe the changes concisely. Do NOT execute anything yet — just describe the plan.`,
+        );
         formData.append("spec", spec);
         formData.append("workspace_path", workspacePath);
         formData.append("history", JSON.stringify(devChatMessages));
-        formData.append("provider", provider);
-        formData.append("model", model);
-        formData.append("api_key", apiKey);
-        filesToSend.forEach(file => formData.append("files", file));
-        
+        filesToSend.forEach((file) => formData.append("files", file));
+
         const response = await fetch("http://localhost:8000/api/dev-chat", {
           method: "POST",
-          body: formData
+          body: formData,
         });
-        
+
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        
+
         const data = await response.json();
         // Store the plan and the original task, show with a Proceed button
         setPendingApplyTask(userMessage);
-        setDevChatMessages(prev => [...prev, { role: "assistant", content: `**📋 Proposed Plan:**\n\n${data.reply}\n\n---\n_Click **Proceed** below to execute this plan, or type a follow-up to refine it._` }]);
+        setDevChatMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: `**📋 Proposed Plan:**\n\n${data.reply}\n\n---\n_Click **Proceed** below to execute this plan, or type a follow-up to refine it._`,
+          },
+        ]);
       } catch (err) {
         console.error("Dev chat plan error:", err);
-        setDevChatMessages(prev => [...prev, { role: "assistant", content: "Failed to generate a plan. Check the backend." }]);
+        setDevChatMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "Failed to generate a plan. Check the backend.",
+          },
+        ]);
         setPendingApplyTask(null);
       } finally {
         setDevChatLoading(false);
@@ -312,23 +423,30 @@ export default function Home() {
         formData.append("spec", spec);
         formData.append("workspace_path", workspacePath);
         formData.append("history", JSON.stringify(devChatMessages));
-        formData.append("provider", provider);
-        formData.append("model", model);
-        formData.append("api_key", apiKey);
-        filesToSend.forEach(file => formData.append("files", file));
-        
+        filesToSend.forEach((file) => formData.append("files", file));
+
         const response = await fetch("http://localhost:8000/api/dev-chat", {
           method: "POST",
-          body: formData
+          body: formData,
         });
-        
+
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        
+
         const data = await response.json();
-        setDevChatMessages(prev => [...prev, { role: "assistant", content: data.reply }]);
+        setDevChatMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: data.reply },
+        ]);
       } catch (err) {
         console.error("Dev chat error:", err);
-        setDevChatMessages(prev => [...prev, { role: "assistant", content: "Sorry, something went wrong. Check that the backend is running." }]);
+        setDevChatMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content:
+              "Sorry, something went wrong. Check that the backend is running.",
+          },
+        ]);
       } finally {
         setDevChatLoading(false);
       }
@@ -337,99 +455,164 @@ export default function Home() {
 
   const handleApplyProceed = () => {
     if (!pendingApplyTask) return;
-    
+
     const taskToExecute = pendingApplyTask;
     setPendingApplyTask(null);
-    setDevChatMessages(prev => [...prev, { role: "user", content: "▶ Proceeding with the plan..." }]);
+    setDevChatMessages((prev) => [
+      ...prev,
+      { role: "user", content: "▶ Proceeding with the plan..." },
+    ]);
     setDeveloperLoading(true);
     setActionLogs([]);
-    
+
     // Build chat context so the iterate agent knows what was discussed
     const chatContext = devChatMessages
       .slice(-10) // last 10 messages for context
-      .map(m => `${m.role === "user" ? "User" : "Dev"}: ${m.content}`)
+      .map((m) => `${m.role === "user" ? "User" : "Dev"}: ${m.content}`)
       .join("\n");
     const fullTask = chatContext
       ? `${taskToExecute}\n\n--- Chat Context ---\n${chatContext}`
       : taskToExecute;
-    
-    const queryParams = new URLSearchParams({
-      task: fullTask,
-      spec: spec,
-      dev_context: agentResult || "",
-      workspace_path: workspacePath,
-      provider: provider,
-      model: model,
-      api_key: apiKey,
-      require_approval: requireApproval ? "true" : "false"
-    });
-    
-    const eventSource = new EventSource(`http://localhost:8000/api/dev-iterate?${queryParams.toString()}`);
-    
-    const addLog = (entry: LogEntry) => setActionLogs(prev => [...prev, entry]);
-    
-    const handleTypedEvent = (eventType: string) => (event: MessageEvent) => {
-      try {
-        const data = JSON.parse(event.data);
-        switch (eventType) {
-          case "thought": addLog({ type: "thought", text: data.text }); break;
-          case "tool_call": addLog({ type: "tool_call", tool: data.tool, input: data.input }); break;
-          case "tool_input": addLog({ type: "tool_input", input: data.input }); break;
-          case "tool_result": addLog({ type: "tool_result", ...data }); break;
-          case "final_answer": addLog({ type: "final_answer", text: data.text }); break;
-          case "system": addLog({ type: "system", text: data.text, level: data.level }); break;
-          case "log": addLog({ type: "log", text: data.text }); break;
-          case "cmd_start": addLog({ type: "cmd_start", cwd: data.cwd, cmd: data.cmd }); break;
-          case "cmd_output": addLog({ type: "cmd_output", stream: data.stream, line: data.line }); break;
-          case "cmd_end": addLog({ type: "cmd_end", exit_code: data.exit_code, success: data.success }); break;
+
+    const addLog = (entry: LogEntry) =>
+      setActionLogs((prev) => [...prev, entry]);
+
+    // Helper to parse SSE from a ReadableStream
+    const processSSEStream = async (
+      reader: ReadableStreamDefaultReader<Uint8Array>,
+    ) => {
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        let currentEvent = "";
+        for (const line of lines) {
+          if (line.startsWith("event: ")) {
+            currentEvent = line.slice(7).trim();
+          } else if (line.startsWith("data: ")) {
+            const dataStr = line.slice(6);
+            try {
+              const data = JSON.parse(dataStr);
+
+              switch (currentEvent) {
+                case "thought":
+                  addLog({ type: "thought", text: data.text });
+                  break;
+                case "tool_call":
+                  addLog({
+                    type: "tool_call",
+                    tool: data.tool,
+                    input: data.input,
+                  });
+                  break;
+                case "tool_input":
+                  addLog({ type: "tool_input", input: data.input });
+                  break;
+                case "tool_result":
+                  addLog({ type: "tool_result", ...data });
+                  break;
+                case "final_answer":
+                  addLog({ type: "final_answer", text: data.text });
+                  break;
+                case "system":
+                  addLog({
+                    type: "system",
+                    text: data.text,
+                    level: data.level,
+                  });
+                  break;
+                case "log":
+                  addLog({ type: "log", text: data.text });
+                  break;
+                case "cmd_start":
+                  addLog({ type: "cmd_start", cwd: data.cwd, cmd: data.cmd });
+                  break;
+                case "cmd_output":
+                  addLog({
+                    type: "cmd_output",
+                    stream: data.stream,
+                    line: data.line,
+                  });
+                  break;
+                case "cmd_end":
+                  addLog({
+                    type: "cmd_end",
+                    exit_code: data.exit_code,
+                    success: data.success,
+                  });
+                  break;
+                case "action_required":
+                  setPendingCommand(data.command);
+                  break;
+                case "result":
+                  if (data.text) {
+                    setDevChatMessages((prev) => [
+                      ...prev,
+                      {
+                        role: "assistant",
+                        content: `✅ **Changes Applied:**\n\n${data.text}`,
+                      },
+                    ]);
+                    setAgentResult(data.text); // keep agentResult up to date for next iterate
+                  }
+                  break;
+                case "done":
+                  setDeveloperLoading(false);
+                  return;
+              }
+            } catch (e) {
+              console.error(`Failed to parse ${currentEvent} event:`, e);
+            }
+          }
         }
-      } catch (e) {
-        console.error(`Failed to parse ${eventType} event:`, e);
       }
     };
-    
-    ["thought", "tool_call", "tool_input", "tool_result", "final_answer", "system", "log", "cmd_start", "cmd_output", "cmd_end"].forEach(evt => {
-      eventSource.addEventListener(evt, handleTypedEvent(evt));
-    });
-    
-    eventSource.addEventListener("action_required", (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        setPendingCommand(data.command);
-      } catch (e) { console.error(e); }
-    });
-    
-    eventSource.addEventListener("result", (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.text) {
-          setDevChatMessages(prev => [...prev, { role: "assistant", content: `✅ **Changes Applied:**\n\n${data.text}` }]);
-        }
-      } catch (e) { console.error(e); }
-    });
-    
-    eventSource.addEventListener("done", () => {
-      eventSource.close();
-      setDeveloperLoading(false);
-    });
-    
-    eventSource.onerror = () => {
-      addLog({ type: "system", text: "Iteration connection closed or errored.", level: "error" });
-      eventSource.close();
-      setDeveloperLoading(false);
-    };
+
+    // POST request with SSE response
+    fetch("http://localhost:8000/api/dev-iterate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        task: fullTask,
+        spec: spec,
+        dev_context: agentResult || "",
+        workspace_path: workspacePath,
+        require_approval: requireApproval,
+      }),
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const reader = res.body!.getReader();
+        return processSSEStream(reader);
+      })
+      .catch((err) => {
+        console.error("Iterate stream failed:", err);
+        addLog({
+          type: "system",
+          text: "Iteration connection closed or errored.",
+          level: "error",
+        });
+        setDeveloperLoading(false);
+      });
   };
 
   const handleCommandApproval = async (approved: boolean) => {
     try {
       setPendingCommand(null);
-      await fetch("http://localhost:8000/api/develop/approve", { 
+      await fetch("http://localhost:8000/api/develop/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
-          approved, 
-          feedback: approved ? undefined : rejectReason 
-        })
+        body: JSON.stringify({
+          approved,
+          feedback: approved ? undefined : rejectReason,
+        }),
       });
       setRejectReason("");
     } catch (err) {
@@ -439,9 +622,8 @@ export default function Home() {
 
   return (
     <div className="flex h-screen bg-[#25343F] text-[#EAEFEF]/80 font-sans selection:bg-[#FF9B51]/30 overflow-hidden">
-      
       {/* SIDEBAR */}
-      <motion.aside 
+      <motion.aside
         initial={{ x: -300, opacity: 0 }}
         animate={{ x: 0, opacity: 1 }}
         transition={{ duration: 0.5, ease: "easeOut" }}
@@ -467,13 +649,14 @@ export default function Home() {
                   key={p}
                   onClick={() => {
                     setProvider(p);
-                    setApiKey(p === "OpenAI" ? defaultOpenAIKey : defaultGoogleKey);
-                    setModel(p === "OpenAI" ? defaultOpenAIModel : defaultGoogleModel);
+                    setModel(p === "OpenAI" ? openaiModel : googleModel);
+                    updateBackendSettings(p);
                   }}
                   className={`px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 border 
-                    ${provider === p 
-                      ? "bg-[#FF9B51]/30 border-[#FF9B51]/50 text-[#EAEFEF] shadow-inner" 
-                      : "bg-black/20 border-[#EAEFEF]/5 hover:bg-[#EAEFEF]/5 text-[#EAEFEF]/60"
+                    ${
+                      provider === p
+                        ? "bg-[#FF9B51]/30 border-[#FF9B51]/50 text-[#EAEFEF] shadow-inner"
+                        : "bg-black/20 border-[#EAEFEF]/5 hover:bg-[#EAEFEF]/5 text-[#EAEFEF]/60"
                     }`}
                 >
                   {p.split(" ")[0]}
@@ -483,28 +666,26 @@ export default function Home() {
           </div>
 
           <div className="space-y-2">
-            <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Model</label>
+            <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+              Model
+            </label>
             <input
               type="text"
               value={model}
-              onChange={(e) => setModel(e.target.value)}
+              onChange={(e) => {
+                setModel(e.target.value);
+                if (provider === "OpenAI") setOpenaiModel(e.target.value);
+                else setGoogleModel(e.target.value);
+                updateBackendSettings(undefined, e.target.value);
+              }}
               className="w-full bg-black/20 border border-[#EAEFEF]/5 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#FF9B51]/50 transition-all placeholder:text-[#EAEFEF]/40"
             />
           </div>
 
           <div className="space-y-2">
-            <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">API Key</label>
-            <input
-              type="password"
-              placeholder={provider === "OpenAI" ? "sk-..." : "AIza..."}
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              className="w-full bg-black/20 border border-[#EAEFEF]/5 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#FF9B51]/50 transition-all font-mono placeholder:font-sans"
-            />
-          </div>
-
-          <div className="space-y-2">
-            <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Workspace Path</label>
+            <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+              Workspace Path
+            </label>
             <input
               type="text"
               placeholder="./workspace"
@@ -512,27 +693,36 @@ export default function Home() {
               onChange={(e) => setWorkspacePath(e.target.value)}
               className="w-full bg-black/20 border border-[#EAEFEF]/5 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#FF9B51]/50 transition-all font-mono placeholder:text-[#EAEFEF]/40"
             />
-            <p className="text-[10px] text-[#BFC9D1]/50 mt-1">Directory where the agent writes code.</p>
+            <p className="text-[10px] text-[#BFC9D1]/50 mt-1">
+              Directory where the agent writes code.
+            </p>
           </div>
 
           <div className="space-y-2 pt-2 border-t border-[#EAEFEF]/5">
             <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center justify-between">
               <span>HITL Verification</span>
-              <button 
+              <button
                 onClick={() => {
                   const newVal = !requireApproval;
                   setRequireApproval(newVal);
                   // If dev agent is running, live-update the approval setting
                   if (developerLoading) {
-                    fetch(`http://localhost:8000/api/develop/toggle-approval?require=${newVal}`, { method: "POST" }).catch(() => {});
+                    fetch(
+                      `http://localhost:8000/api/develop/toggle-approval?require=${newVal}`,
+                      { method: "POST" },
+                    ).catch(() => {});
                   }
                 }}
-                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full transition-colors duration-200 ease-in-out ${requireApproval ? 'bg-[#FF9B51]' : 'bg-[#EAEFEF]/20'}`}
+                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full transition-colors duration-200 ease-in-out ${requireApproval ? "bg-[#FF9B51]" : "bg-[#EAEFEF]/20"}`}
               >
-                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ease-in-out mt-0.5 ${requireApproval ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ease-in-out mt-0.5 ${requireApproval ? "translate-x-4" : "translate-x-0.5"}`}
+                />
               </button>
             </label>
-            <p className="text-[10px] text-[#EAEFEF]/40 mt-1">Require explicit approval before executing any Terminal commands.</p>
+            <p className="text-[10px] text-[#EAEFEF]/40 mt-1">
+              Require explicit approval before executing any Terminal commands.
+            </p>
           </div>
         </div>
       </motion.aside>
@@ -540,44 +730,56 @@ export default function Home() {
       {/* MAIN CONTENT */}
       <main className="flex-1 overflow-y-auto p-10 relative">
         <div className="max-w-4xl mx-auto space-y-12 pb-32">
-          
           {/* HEADER AREA */}
-          <motion.div 
-            initial={{ y: 20, opacity: 0 }} 
-            animate={{ y: 0, opacity: 1 }} 
+          <motion.div
+            initial={{ y: 20, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
             transition={{ delay: 0.1 }}
             className="space-y-2"
           >
-            <h2 className="text-3xl font-light text-[#EAEFEF] tracking-tight">What are we building?</h2>
-            <p className="text-[#EAEFEF]/60 text-sm">Enter a high level idea and watch the agents build the software.</p>
+            <h2 className="text-3xl font-light text-[#EAEFEF] tracking-tight">
+              What are we building?
+            </h2>
+            <p className="text-[#EAEFEF]/60 text-sm">
+              Enter a high level idea and watch the agents build the software.
+            </p>
           </motion.div>
 
           {/* MAIN INTERFACE: Split view for Chat & Spec */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 h-[600px]">
-            
             {/* LEFT COLUMN: CHAT */}
             <div className="flex flex-col bg-black/20 border border-[#EAEFEF]/5 rounded-2xl shadow-xl overflow-hidden h-full">
               <div className="p-4 bg-gradient-to-r from-[#FF9B51]/40 to-[#FF9B51]/20 border-b border-[#EAEFEF]/5">
                 <h3 className="text-lg font-medium text-[#EAEFEF] flex items-center gap-2">
-                  <Sparkles className="w-4 h-4 text-[#FF9B51]" /> Chat with Lead Designer
+                  <Sparkles className="w-4 h-4 text-[#FF9B51]" /> Chat with Lead
+                  Designer
                 </h3>
-                <p className="text-xs text-[#EAEFEF]/60 mt-1">Start by describing your app. Attach PDFs or Images.</p>
+                <p className="text-xs text-[#EAEFEF]/60 mt-1">
+                  Start by describing your app. Attach PDFs or Images.
+                </p>
               </div>
-              
+
               <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
                 {chatHistory.length === 0 && (
                   <div className="h-full flex flex-col items-center justify-center text-[#EAEFEF]/30 space-y-3">
                     <Box className="w-8 h-8 opacity-50" />
-                    <p className="text-sm">No messages yet. Tell me what to build!</p>
+                    <p className="text-sm">
+                      No messages yet. Tell me what to build!
+                    </p>
                   </div>
                 )}
                 {chatHistory.map((msg, idx) => (
-                  <div key={idx} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-                    <div className={`max-w-[80%] rounded-2xl px-4 py-2 text-sm ${
-                      msg.role === "user" 
-                        ? "bg-[#FF9B51] text-[#25343F] font-medium" 
-                        : "bg-white/5 border border-white/10 text-[#EAEFEF]/90"
-                    }`}>
+                  <div
+                    key={idx}
+                    className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+                  >
+                    <div
+                      className={`max-w-[80%] rounded-2xl px-4 py-2 text-sm ${
+                        msg.role === "user"
+                          ? "bg-[#FF9B51] text-[#25343F] font-medium"
+                          : "bg-white/5 border border-white/10 text-[#EAEFEF]/90"
+                      }`}
+                    >
                       {msg.content}
                     </div>
                   </div>
@@ -585,7 +787,8 @@ export default function Home() {
                 {designerLoading && (
                   <div className="flex justify-start">
                     <div className="max-w-[80%] rounded-2xl px-4 py-2 text-sm bg-white/5 border border-white/10 text-[#EAEFEF]/60 flex items-center gap-2">
-                      <Loader2 className="w-4 h-4 animate-spin" /> Rethinking architecture...
+                      <Loader2 className="w-4 h-4 animate-spin" /> Rethinking
+                      architecture...
                     </div>
                   </div>
                 )}
@@ -596,14 +799,26 @@ export default function Home() {
                 {attachedFiles.length > 0 && (
                   <div className="flex gap-2 mx-2 overflow-x-auto custom-scrollbar pb-2">
                     {attachedFiles.map((f, i) => (
-                      <div key={i} className="flex items-center gap-2 shrink-0 bg-[#FF9B51]/30 border border-[#FF9B51]/50 text-[#EAEFEF] text-xs px-2 py-1 rounded-md">
+                      <div
+                        key={i}
+                        className="flex items-center gap-2 shrink-0 bg-[#FF9B51]/30 border border-[#FF9B51]/50 text-[#EAEFEF] text-xs px-2 py-1 rounded-md"
+                      >
                         <span className="truncate max-w-[100px]">{f.name}</span>
-                        <button onClick={() => setAttachedFiles(prev => prev.filter((_, idx) => idx !== i))} className="text-[#EAEFEF]/60 hover:text-white">&times;</button>
+                        <button
+                          onClick={() =>
+                            setAttachedFiles((prev) =>
+                              prev.filter((_, idx) => idx !== i),
+                            )
+                          }
+                          className="text-[#EAEFEF]/60 hover:text-white"
+                        >
+                          &times;
+                        </button>
                       </div>
                     ))}
                   </div>
                 )}
-                
+
                 <div className="flex items-end gap-2">
                   <div className="relative flex-1 group">
                     <textarea
@@ -625,27 +840,34 @@ export default function Home() {
                           if (item.type.startsWith("image/")) {
                             const file = item.getAsFile();
                             if (file) {
-                              const named = new File([file], `clipboard-${Date.now()}.png`, { type: file.type });
-                              setAttachedFiles(prev => [...prev, named]);
+                              const named = new File(
+                                [file],
+                                `clipboard-${Date.now()}.png`,
+                                { type: file.type },
+                              );
+                              setAttachedFiles((prev) => [...prev, named]);
                             }
                           }
                         }
                       }}
                     />
                     {/* Hidden File Input */}
-                    <input 
-                      type="file" 
-                      multiple 
-                      id="file-upload" 
-                      className="hidden" 
+                    <input
+                      type="file"
+                      multiple
+                      id="file-upload"
+                      className="hidden"
                       accept=".pdf,image/*"
                       onChange={(e) => {
                         if (e.target.files) {
-                          setAttachedFiles(prev => [...prev, ...Array.from(e.target.files!)]);
+                          setAttachedFiles((prev) => [
+                            ...prev,
+                            ...Array.from(e.target.files!),
+                          ]);
                         }
                       }}
                     />
-                    <label 
+                    <label
                       htmlFor="file-upload"
                       className="absolute right-3 top-3 text-[#EAEFEF]/40 hover:text-[#FF9B51] cursor-pointer transition-colors"
                       title="Attach PDFs or Images"
@@ -653,7 +875,7 @@ export default function Home() {
                       <Paperclip className="w-5 h-5" />
                     </label>
                   </div>
-                  
+
                   <button
                     onClick={handleChatSubmit}
                     disabled={designerLoading}
@@ -670,13 +892,13 @@ export default function Home() {
               {/* Tabs */}
               <div className="flex justify-between items-center bg-black/40 border-b border-[#EAEFEF]/5 p-2">
                 <div className="flex gap-2">
-                  <button 
+                  <button
                     onClick={() => setSpecTab("preview")}
                     className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${specTab === "preview" ? "bg-[#FF9B51]/40 text-[#EAEFEF]" : "text-[#EAEFEF]/50 hover:text-[#EAEFEF]/80 hover:bg-[#EAEFEF]/5"}`}
                   >
                     Preview
                   </button>
-                  <button 
+                  <button
                     onClick={() => setSpecTab("edit")}
                     className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${specTab === "edit" ? "bg-[#FF9B51]/40 text-[#EAEFEF]" : "text-[#EAEFEF]/50 hover:text-[#EAEFEF]/80 hover:bg-[#EAEFEF]/5"}`}
                   >
@@ -686,19 +908,23 @@ export default function Home() {
                 {spec && (
                   <div className="flex gap-2">
                     {developerLoading && (
-                       <button
-                         onClick={handleStopDevelop}
-                         className="px-4 py-1.5 bg-red-500/20 text-red-500 hover:bg-red-500/30 border border-red-500/50 text-sm font-semibold rounded-lg flex items-center gap-1.5 transition-all active:scale-95 shadow-md"
-                       >
-                         <XCircle className="w-4 h-4" /> Stop Agent
-                       </button>
+                      <button
+                        onClick={handleStopDevelop}
+                        className="px-4 py-1.5 bg-red-500/20 text-red-500 hover:bg-red-500/30 border border-red-500/50 text-sm font-semibold rounded-lg flex items-center gap-1.5 transition-all active:scale-95 shadow-md"
+                      >
+                        <XCircle className="w-4 h-4" /> Stop Agent
+                      </button>
                     )}
                     <button
                       onClick={handleDevelop}
                       disabled={developerLoading || designerLoading}
                       className="px-4 py-1.5 bg-white text-[#25343F] text-sm font-semibold rounded-lg flex items-center gap-1.5 hover:bg-gray-200 transition-all active:scale-95 shadow-md disabled:opacity-50"
                     >
-                      {developerLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : "Approve & Dev →"}
+                      {developerLoading ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        "Approve & Dev →"
+                      )}
                     </button>
                   </div>
                 )}
@@ -706,7 +932,7 @@ export default function Home() {
 
               {/* Content */}
               <div className="flex-1 relative">
-                 {specTab === "edit" ? (
+                {specTab === "edit" ? (
                   <textarea
                     className="w-full h-full absolute inset-0 bg-transparent p-6 text-[#EAEFEF]/90 focus:outline-none font-mono text-sm leading-relaxed resize-none custom-scrollbar"
                     value={spec}
@@ -716,12 +942,13 @@ export default function Home() {
                   />
                 ) : (
                   <div className="w-full h-full absolute inset-0 bg-transparent p-6 text-[#EAEFEF]/90 overflow-y-auto custom-scrollbar prose prose-invert prose-slate max-w-none prose-p:text-[#EAEFEF]/80 prose-headings:text-[#EAEFEF]">
-                    <ReactMarkdown>{spec || "_Awaiting initial instructions..._"}</ReactMarkdown>
+                    <ReactMarkdown>
+                      {spec || "_Awaiting initial instructions..._"}
+                    </ReactMarkdown>
                   </div>
                 )}
               </div>
             </div>
-            
           </div>
 
           {/* STEP 3: ACTION AGENT TERMINAL */}
@@ -737,15 +964,18 @@ export default function Home() {
                     <div className="w-8 h-8 rounded-full bg-[#FF9B51]/20 flex items-center justify-center border border-[#FF9B51]/40">
                       <TerminalSquare className="w-4 h-4 text-[#FF9B51]" />
                     </div>
-                    <h3 className="text-xl font-medium text-[#EAEFEF]">Live Terminal Stream</h3>
+                    <h3 className="text-xl font-medium text-[#EAEFEF]">
+                      Live Terminal Stream
+                    </h3>
                   </div>
                   {developerLoading && (
                     <div className="flex items-center gap-2 text-sm text-[#FF9B51] font-medium animate-pulse">
-                      <Loader2 className="w-4 h-4 animate-spin" /> Autonomous Agent Active
+                      <Loader2 className="w-4 h-4 animate-spin" /> Autonomous
+                      Agent Active
                     </div>
                   )}
                 </div>
-                
+
                 {/* Terminal Window Block */}
                 <div className="bg-[#0A0A0B] border border-[#EAEFEF]/10 rounded-2xl shadow-2xl overflow-hidden font-mono text-sm leading-relaxed h-[400px] flex flex-col">
                   {/* Mac style OS header */}
@@ -753,9 +983,11 @@ export default function Home() {
                     <div className="w-3 h-3 rounded-full bg-red-500/80"></div>
                     <div className="w-3 h-3 rounded-full bg-yellow-500/80"></div>
                     <div className="w-3 h-3 rounded-full bg-green-500/80"></div>
-                    <div className="mx-auto text-[10px] text-white/30 tracking-widest uppercase truncate max-w-[50%]">BASH ~ {workspacePath}</div>
+                    <div className="mx-auto text-[10px] text-white/30 tracking-widest uppercase truncate max-w-[50%]">
+                      BASH ~ {workspacePath}
+                    </div>
                   </div>
-                  
+
                   {/* Streaming Logs */}
                   <div className="flex-1 overflow-y-auto p-4 space-y-2 custom-scrollbar text-[#EAEFEF]/80 relative">
                     {actionLogs.map((log, idx) => {
@@ -765,17 +997,31 @@ export default function Home() {
                           return (
                             <div key={idx} className="group">
                               <button
-                                onClick={() => setExpandedThoughts(prev => {
-                                  const next = new Set(prev);
-                                  next.has(idx) ? next.delete(idx) : next.add(idx);
-                                  return next;
-                                })}
+                                onClick={() =>
+                                  setExpandedThoughts((prev) => {
+                                    const next = new Set(prev);
+                                    next.has(idx)
+                                      ? next.delete(idx)
+                                      : next.add(idx);
+                                    return next;
+                                  })
+                                }
                                 className="flex items-center gap-2 text-[#EAEFEF]/40 hover:text-[#EAEFEF]/70 transition-colors text-xs w-full text-left"
                               >
                                 <Brain className="w-3 h-3 shrink-0" />
-                                {isExpanded ? <ChevronDown className="w-3 h-3 shrink-0" /> : <ChevronRight className="w-3 h-3 shrink-0" />}
-                                <span className="font-medium">Agent Thinking</span>
-                                {!isExpanded && <span className="truncate opacity-60 ml-1">{log.text.slice(0, 80)}...</span>}
+                                {isExpanded ? (
+                                  <ChevronDown className="w-3 h-3 shrink-0" />
+                                ) : (
+                                  <ChevronRight className="w-3 h-3 shrink-0" />
+                                )}
+                                <span className="font-medium">
+                                  Agent Thinking
+                                </span>
+                                {!isExpanded && (
+                                  <span className="truncate opacity-60 ml-1">
+                                    {log.text.slice(0, 80)}...
+                                  </span>
+                                )}
                               </button>
                               {isExpanded && (
                                 <div className="ml-5 mt-1 pl-3 border-l border-[#EAEFEF]/10 text-[#EAEFEF]/50 text-xs whitespace-pre-wrap leading-relaxed">
@@ -787,32 +1033,58 @@ export default function Home() {
 
                         case "tool_call":
                           return (
-                            <div key={idx} className="mt-3 flex items-center gap-2">
+                            <div
+                              key={idx}
+                              className="mt-3 flex items-center gap-2"
+                            >
                               <Terminal className="w-3.5 h-3.5 text-green-400 shrink-0" />
-                              <span className="text-green-400 text-xs font-semibold uppercase tracking-wider">Using Tool:</span>
-                              <span className="text-green-300 text-sm font-medium">{log.tool}</span>
+                              <span className="text-green-400 text-xs font-semibold uppercase tracking-wider">
+                                Using Tool:
+                              </span>
+                              <span className="text-green-300 text-sm font-medium">
+                                {log.tool}
+                              </span>
                             </div>
                           );
 
                         case "tool_input":
                           return (
-                            <div key={idx} className="ml-5 bg-white/5 border border-white/10 rounded-lg p-2 font-mono text-xs text-[#EAEFEF]/70 whitespace-pre-wrap break-all max-h-32 overflow-y-auto custom-scrollbar">
+                            <div
+                              key={idx}
+                              className="ml-5 bg-white/5 border border-white/10 rounded-lg p-2 font-mono text-xs text-[#EAEFEF]/70 whitespace-pre-wrap break-all max-h-32 overflow-y-auto custom-scrollbar"
+                            >
                               {log.input}
                             </div>
                           );
 
                         case "tool_result":
                           return (
-                            <div key={idx} className={`ml-5 mb-2 rounded-lg border overflow-hidden ${log.success ? 'border-green-500/30' : 'border-red-500/40'}`}>
+                            <div
+                              key={idx}
+                              className={`ml-5 mb-2 rounded-lg border overflow-hidden ${log.success ? "border-green-500/30" : "border-red-500/40"}`}
+                            >
                               {/* Result header */}
-                              <div className={`flex items-center gap-2 px-3 py-1.5 text-xs ${log.success ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
-                                {log.success ? <CheckCircle className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
-                                <span className="font-semibold">{log.success ? "SUCCESS" : "FAILED"}</span>
-                                {log.tool === "terminal" && log.exit_code !== null && (
-                                  <span className="opacity-60">Exit code {log.exit_code}</span>
+                              <div
+                                className={`flex items-center gap-2 px-3 py-1.5 text-xs ${log.success ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"}`}
+                              >
+                                {log.success ? (
+                                  <CheckCircle className="w-3 h-3" />
+                                ) : (
+                                  <XCircle className="w-3 h-3" />
                                 )}
+                                <span className="font-semibold">
+                                  {log.success ? "SUCCESS" : "FAILED"}
+                                </span>
+                                {log.tool === "terminal" &&
+                                  log.exit_code !== null && (
+                                    <span className="opacity-60">
+                                      Exit code {log.exit_code}
+                                    </span>
+                                  )}
                                 {log.cwd && (
-                                  <span className="ml-auto bg-black/30 px-2 py-0.5 rounded text-[10px] text-[#EAEFEF]/50 font-mono">{log.cwd}</span>
+                                  <span className="ml-auto bg-black/30 px-2 py-0.5 rounded text-[10px] text-[#EAEFEF]/50 font-mono">
+                                    {log.cwd}
+                                  </span>
                                 )}
                               </div>
                               {/* Command */}
@@ -838,11 +1110,16 @@ export default function Home() {
 
                         case "final_answer":
                           return (
-                            <div key={idx} className="mt-3 bg-[#FF9B51]/20 border border-[#FF9B51]/40 rounded-lg p-3">
+                            <div
+                              key={idx}
+                              className="mt-3 bg-[#FF9B51]/20 border border-[#FF9B51]/40 rounded-lg p-3"
+                            >
                               <div className="flex items-center gap-2 text-xs text-[#FF9B51] font-semibold mb-1">
                                 <Sparkles className="w-3 h-3" /> Agent Summary
                               </div>
-                              <div className="text-sm text-[#EAEFEF]/90 whitespace-pre-wrap">{log.text}</div>
+                              <div className="text-sm text-[#EAEFEF]/90 whitespace-pre-wrap">
+                                {log.text}
+                              </div>
                             </div>
                           );
 
@@ -850,48 +1127,81 @@ export default function Home() {
                           const colorMap = {
                             info: "text-blue-400",
                             warn: "text-yellow-400",
-                            error: "text-red-400"
+                            error: "text-red-400",
                           };
                           const bgMap = {
                             info: "bg-blue-500/5",
                             warn: "bg-yellow-500/5",
-                            error: "bg-red-500/10"
+                            error: "bg-red-500/10",
                           };
                           return (
-                            <div key={idx} className={`flex items-center gap-2 px-2 py-1 rounded text-xs font-medium ${colorMap[log.level]} ${bgMap[log.level]} mt-1`}>
-                              {log.level === "error" ? <XCircle className="w-3 h-3" /> : log.level === "warn" ? <AlertTriangle className="w-3 h-3" /> : <TerminalSquare className="w-3 h-3" />}
+                            <div
+                              key={idx}
+                              className={`flex items-center gap-2 px-2 py-1 rounded text-xs font-medium ${colorMap[log.level]} ${bgMap[log.level]} mt-1`}
+                            >
+                              {log.level === "error" ? (
+                                <XCircle className="w-3 h-3" />
+                              ) : log.level === "warn" ? (
+                                <AlertTriangle className="w-3 h-3" />
+                              ) : (
+                                <TerminalSquare className="w-3 h-3" />
+                              )}
                               {log.text}
                             </div>
                           );
 
                         case "log":
                           return (
-                            <div key={idx} className="text-xs text-[#EAEFEF]/50 whitespace-pre-wrap pl-2">{log.text}</div>
+                            <div
+                              key={idx}
+                              className="text-xs text-[#EAEFEF]/50 whitespace-pre-wrap pl-2"
+                            >
+                              {log.text}
+                            </div>
                           );
 
                         case "cmd_start":
                           return (
-                            <div key={idx} className="mt-3 bg-black/30 border border-white/10 rounded-lg overflow-hidden">
+                            <div
+                              key={idx}
+                              className="mt-3 bg-black/30 border border-white/10 rounded-lg overflow-hidden"
+                            >
                               <div className="flex items-center gap-2 px-3 py-1.5">
                                 <Terminal className="w-3 h-3 text-green-400" />
-                                <span className="text-green-400 font-mono text-xs font-medium">$ {log.cmd}</span>
-                                <span className="ml-auto bg-black/30 px-2 py-0.5 rounded text-[10px] text-[#EAEFEF]/40 font-mono">{log.cwd}</span>
+                                <span className="text-green-400 font-mono text-xs font-medium">
+                                  $ {log.cmd}
+                                </span>
+                                <span className="ml-auto bg-black/30 px-2 py-0.5 rounded text-[10px] text-[#EAEFEF]/40 font-mono">
+                                  {log.cwd}
+                                </span>
                               </div>
                             </div>
                           );
 
                         case "cmd_output":
                           return (
-                            <div key={idx} className={`pl-5 font-mono text-[11px] whitespace-pre-wrap ${log.stream === "stderr" ? "text-red-400/70" : "text-[#EAEFEF]/60"}`}>
+                            <div
+                              key={idx}
+                              className={`pl-5 font-mono text-[11px] whitespace-pre-wrap ${log.stream === "stderr" ? "text-red-400/70" : "text-[#EAEFEF]/60"}`}
+                            >
                               {log.line}
                             </div>
                           );
 
                         case "cmd_end":
                           return (
-                            <div key={idx} className={`pl-5 flex items-center gap-1.5 text-[10px] font-medium mt-0.5 mb-1 ${log.success ? "text-green-500/70" : "text-red-400"}`}>
-                              {log.success ? <CheckCircle className="w-2.5 h-2.5" /> : <XCircle className="w-2.5 h-2.5" />}
-                              {log.success ? "Done" : `Failed (exit ${log.exit_code})`}
+                            <div
+                              key={idx}
+                              className={`pl-5 flex items-center gap-1.5 text-[10px] font-medium mt-0.5 mb-1 ${log.success ? "text-green-500/70" : "text-red-400"}`}
+                            >
+                              {log.success ? (
+                                <CheckCircle className="w-2.5 h-2.5" />
+                              ) : (
+                                <XCircle className="w-2.5 h-2.5" />
+                              )}
+                              {log.success
+                                ? "Done"
+                                : `Failed (exit ${log.exit_code})`}
                             </div>
                           );
 
@@ -899,13 +1209,13 @@ export default function Home() {
                           return null;
                       }
                     })}
-                    
+
                     {/* Auto-scroll anchor */}
                     <div ref={logsEndRef} />
-                    
+
                     {/* HITL Action Block */}
                     {pendingCommand && (
-                      <motion.div 
+                      <motion.div
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
                         className="sticky bottom-4 mx-4 bg-[#FF9B51]/20 border border-[#FF9B51]/50 backdrop-blur-md rounded-xl p-4 shadow-2xl z-10"
@@ -913,8 +1223,13 @@ export default function Home() {
                         <div className="flex items-start gap-3">
                           <AlertTriangle className="w-5 h-5 text-yellow-500 shrink-0 mt-0.5" />
                           <div className="flex-1">
-                            <h4 className="text-sm font-semibold text-[#EAEFEF]">Action Required</h4>
-                            <p className="text-xs text-[#EAEFEF]/70 mt-1 mb-3">The agent wants to execute the following operation:</p>
+                            <h4 className="text-sm font-semibold text-[#EAEFEF]">
+                              Action Required
+                            </h4>
+                            <p className="text-xs text-[#EAEFEF]/70 mt-1 mb-3">
+                              The agent wants to execute the following
+                              operation:
+                            </p>
                             <div className="bg-black/50 p-2 rounded border border-[#EAEFEF]/10 font-mono text-[10px] text-green-400 break-all mb-4 whitespace-pre-wrap max-h-40 overflow-y-auto custom-scrollbar">
                               {pendingCommand}
                             </div>
@@ -926,17 +1241,19 @@ export default function Home() {
                               className="w-full bg-black/40 border border-white/10 rounded px-3 py-1.5 text-xs text-white mb-4 focus:outline-none focus:ring-1 focus:ring-red-500/50 placeholder:text-white/30"
                             />
                             <div className="flex gap-2">
-                              <button 
+                              <button
                                 onClick={() => handleCommandApproval(true)}
                                 className="flex-1 py-1.5 bg-green-500/20 text-green-400 hover:bg-green-500/30 border border-green-500/50 rounded flex items-center justify-center gap-1 text-xs font-semibold transition-colors"
                               >
-                                <CheckCircle className="w-3.5 h-3.5" /> Approve Action
+                                <CheckCircle className="w-3.5 h-3.5" /> Approve
+                                Action
                               </button>
-                              <button 
+                              <button
                                 onClick={() => handleCommandApproval(false)}
                                 className="flex-1 py-1.5 bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/50 rounded flex items-center justify-center gap-1 text-xs font-semibold transition-colors"
                               >
-                                <XCircle className="w-3.5 h-3.5" /> Reject & Rethink
+                                <XCircle className="w-3.5 h-3.5" /> Reject &
+                                Rethink
                               </button>
                             </div>
                           </div>
@@ -963,12 +1280,16 @@ export default function Home() {
                   <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#FF9B51] to-[#FF9B51] flex items-center justify-center shadow-lg shadow-[#FF9B51]/30">
                     <Sparkles className="w-4 h-4 text-white" />
                   </div>
-                  <h3 className="text-xl font-medium text-[#EAEFEF]">Agent Result</h3>
+                  <h3 className="text-xl font-medium text-[#EAEFEF]">
+                    Agent Result
+                  </h3>
                 </div>
 
                 <div className="bg-black/20 border border-[#FF9B51]/30 rounded-2xl shadow-xl overflow-hidden">
                   <div className="flex items-center justify-between px-4 py-2 bg-[#FF9B51]/20 border-b border-[#FF9B51]/20">
-                    <span className="text-xs text-[#EAEFEF]/60 font-medium uppercase tracking-wider">Development Summary</span>
+                    <span className="text-xs text-[#EAEFEF]/60 font-medium uppercase tracking-wider">
+                      Development Summary
+                    </span>
                     <button
                       onClick={() => navigator.clipboard.writeText(agentResult)}
                       className="text-xs text-[#EAEFEF]/40 hover:text-[#EAEFEF]/80 transition-colors px-2 py-1 rounded hover:bg-white/5"
@@ -998,7 +1319,9 @@ export default function Home() {
                   <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#2D4961] to-[#395370] flex items-center justify-center shadow-lg shadow-[#2D4961]/30">
                     <Code2 className="w-4 h-4 text-white" />
                   </div>
-                  <h3 className="text-xl font-medium text-[#EAEFEF]">Chat with Developer</h3>
+                  <h3 className="text-xl font-medium text-[#EAEFEF]">
+                    Chat with Developer
+                  </h3>
                   <div className="ml-auto flex gap-1 bg-black/30 rounded-lg p-0.5">
                     <button
                       onClick={() => setDevChatMode("ask")}
@@ -1034,12 +1357,17 @@ export default function Home() {
                       </div>
                     )}
                     {devChatMessages.map((msg, idx) => (
-                      <div key={idx} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-                        <div className={`max-w-[85%] rounded-xl px-4 py-2.5 text-sm ${
-                          msg.role === "user"
-                            ? "bg-[#395370]/40 text-[#EAEFEF] border border-[#395370]/50"
-                            : "bg-white/5 text-[#EAEFEF]/90 border border-white/10"
-                        }`}>
+                      <div
+                        key={idx}
+                        className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+                      >
+                        <div
+                          className={`max-w-[85%] rounded-xl px-4 py-2.5 text-sm ${
+                            msg.role === "user"
+                              ? "bg-[#395370]/40 text-[#EAEFEF] border border-[#395370]/50"
+                              : "bg-white/5 text-[#EAEFEF]/90 border border-white/10"
+                          }`}
+                        >
                           {msg.role === "assistant" ? (
                             <div className="prose prose-invert prose-sm max-w-none prose-p:text-[#EAEFEF]/80 prose-code:text-[#6B9FC4] prose-pre:bg-black/40 prose-pre:border prose-pre:border-white/10">
                               <ReactMarkdown>{msg.content}</ReactMarkdown>
@@ -1060,7 +1388,13 @@ export default function Home() {
                           ▶ Proceed
                         </button>
                         <button
-                          onClick={() => { setPendingApplyTask(null); setDevChatMessages(prev => [...prev, { role: "user", content: "✕ Cancelled." }]); }}
+                          onClick={() => {
+                            setPendingApplyTask(null);
+                            setDevChatMessages((prev) => [
+                              ...prev,
+                              { role: "user", content: "✕ Cancelled." },
+                            ]);
+                          }}
                           className="px-4 py-2 bg-white/10 hover:bg-white/20 text-[#EAEFEF]/70 text-sm font-medium rounded-lg transition-all"
                         >
                           Cancel
@@ -1070,7 +1404,8 @@ export default function Home() {
                     {devChatLoading && (
                       <div className="flex justify-start">
                         <div className="bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-[#EAEFEF]/50 flex items-center gap-2">
-                          <Loader2 className="w-3 h-3 animate-spin" /> Thinking...
+                          <Loader2 className="w-3 h-3 animate-spin" />{" "}
+                          Thinking...
                         </div>
                       </div>
                     )}
@@ -1083,9 +1418,23 @@ export default function Home() {
                     {devChatFiles.length > 0 && (
                       <div className="flex gap-2 overflow-x-auto custom-scrollbar pb-1">
                         {devChatFiles.map((f, i) => (
-                          <div key={i} className="flex items-center gap-2 shrink-0 bg-[#2D4961]/30 border border-[#395370]/50 text-[#EAEFEF] text-xs px-2 py-1 rounded-md">
-                            <span className="truncate max-w-[100px]">{f.name}</span>
-                            <button onClick={() => setDevChatFiles(prev => prev.filter((_, idx) => idx !== i))} className="text-[#EAEFEF]/60 hover:text-white">&times;</button>
+                          <div
+                            key={i}
+                            className="flex items-center gap-2 shrink-0 bg-[#2D4961]/30 border border-[#395370]/50 text-[#EAEFEF] text-xs px-2 py-1 rounded-md"
+                          >
+                            <span className="truncate max-w-[100px]">
+                              {f.name}
+                            </span>
+                            <button
+                              onClick={() =>
+                                setDevChatFiles((prev) =>
+                                  prev.filter((_, idx) => idx !== i),
+                                )
+                              }
+                              className="text-[#EAEFEF]/60 hover:text-white"
+                            >
+                              &times;
+                            </button>
                           </div>
                         ))}
                       </div>
@@ -1097,7 +1446,12 @@ export default function Home() {
                           value={devChatInput}
                           onChange={(e) => setDevChatInput(e.target.value)}
                           onKeyDown={(e) => {
-                            if (e.key === "Enter" && !e.shiftKey && devChatInput.trim() && !devChatLoading) {
+                            if (
+                              e.key === "Enter" &&
+                              !e.shiftKey &&
+                              devChatInput.trim() &&
+                              !devChatLoading
+                            ) {
                               e.preventDefault();
                               handleDevChat();
                             }
@@ -1109,8 +1463,12 @@ export default function Home() {
                               if (item.type.startsWith("image/")) {
                                 const file = item.getAsFile();
                                 if (file) {
-                                  const named = new File([file], `clipboard-${Date.now()}.png`, { type: file.type });
-                                  setDevChatFiles(prev => [...prev, named]);
+                                  const named = new File(
+                                    [file],
+                                    `clipboard-${Date.now()}.png`,
+                                    { type: file.type },
+                                  );
+                                  setDevChatFiles((prev) => [...prev, named]);
                                 }
                               }
                             }
@@ -1127,7 +1485,10 @@ export default function Home() {
                           accept="image/*"
                           onChange={(e) => {
                             if (e.target.files) {
-                              setDevChatFiles(prev => [...prev, ...Array.from(e.target.files!)]);
+                              setDevChatFiles((prev) => [
+                                ...prev,
+                                ...Array.from(e.target.files!),
+                              ]);
                             }
                           }}
                         />
@@ -1152,10 +1513,9 @@ export default function Home() {
               </motion.div>
             )}
           </AnimatePresence>
-
         </div>
       </main>
-      
+
       {/* Floating scroll-to-top button */}
       <button
         onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
@@ -1166,12 +1526,16 @@ export default function Home() {
       </button>
 
       {/* Global generic custom scrollbar style embedded */}
-      <style dangerouslySetInnerHTML={{__html: `
+      <style
+        dangerouslySetInnerHTML={{
+          __html: `
         .custom-scrollbar::-webkit-scrollbar { width: 8px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
         .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
-      `}} />
+      `,
+        }}
+      />
     </div>
   );
 }
