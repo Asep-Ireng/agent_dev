@@ -1,0 +1,400 @@
+import React, { useRef, useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  TerminalSquare,
+  Loader2,
+  Brain,
+  ChevronDown,
+  ChevronRight,
+  Terminal as TerminalIcon,
+  CheckCircle,
+  XCircle,
+  AlertTriangle,
+  Sparkles,
+} from "lucide-react";
+import { LogEntry } from "../types";
+
+interface TerminalProps {
+  actionLogs: LogEntry[];
+  developerLoading: boolean;
+  workspacePath: string;
+  pendingCommand: string | null;
+  rejectReason: string;
+  setRejectReason: (r: string) => void;
+  handleCommandApproval: (approved: boolean) => void;
+  expandedThoughts: Set<number>;
+  setExpandedThoughts: React.Dispatch<React.SetStateAction<Set<number>>>;
+}
+
+export default function Terminal({
+  actionLogs,
+  developerLoading,
+  workspacePath,
+  pendingCommand,
+  rejectReason,
+  setRejectReason,
+  handleCommandApproval,
+  expandedThoughts,
+  setExpandedThoughts,
+}: TerminalProps) {
+  const logsEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll terminal to bottom when new logs arrive
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [actionLogs, pendingCommand]);
+
+  if (actionLogs.length === 0 && !developerLoading) return null;
+
+  return (
+    <AnimatePresence>
+      <motion.div
+        initial={{ y: 30, opacity: 0, scale: 0.95 }}
+        animate={{ y: 0, opacity: 1, scale: 1 }}
+        className="space-y-4 pt-8 border-t border-white/5"
+      >
+        <div className="flex justify-between items-center">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-full bg-[#FF9B51]/20 flex items-center justify-center border border-[#FF9B51]/40">
+              <TerminalSquare className="w-4 h-4 text-[#FF9B51]" />
+            </div>
+            <h3 className="text-xl font-medium text-[#EAEFEF]">
+              Live Terminal Stream
+            </h3>
+          </div>
+          {developerLoading && (
+            <div className="flex  font-medium animate-pulse">
+              <Loader2 className="w-4 h-4 animate-spin" /> Autonomous Agent
+              Active
+            </div>
+          )}
+        </div>
+
+        {/* Terminal Window Block */}
+        <div className="bg-[#0A0A0B] border border-[#EAEFEF]/10 rounded-2xl shadow-2xl overflow-hidden font-mono text-sm leading-relaxed h-[400px] flex flex-col">
+          {/* Mac style OS header */}
+          <div className="flex gap-2 p-3 bg-white/5 border-b border-white/5 items-center">
+            <div className="w-3 h-3 rounded-full bg-red-500/80"></div>
+            <div className="w-3 h-3 rounded-full bg-yellow-500/80"></div>
+            <div className="w-3 h-3 rounded-full bg-green-500/80"></div>
+            <div className="mx-auto text-[10px] text-white/30 tracking-widest uppercase truncate max-w-[50%]">
+              BASH ~ {workspacePath}
+            </div>
+          </div>
+
+          {/* Streaming Logs */}
+          <div className="flex-1 overflow-y-auto p-4 space-y-2 custom-scrollbar text-[#EAEFEF]/80 relative">
+            {actionLogs.map((log, idx) => {
+              switch (log.type) {
+                case "thought":
+                  const isExpanded = expandedThoughts.has(idx);
+                  return (
+                    <div key={idx} className="group">
+                      <button
+                        onClick={() =>
+                          setExpandedThoughts((prev) => {
+                            const next = new Set(prev);
+                            next.has(idx) ? next.delete(idx) : next.add(idx);
+                            return next;
+                          })
+                        }
+                        className="flex items-center gap-2 text-[#EAEFEF]/40 hover:text-[#EAEFEF]/70 transition-colors text-xs w-full text-left"
+                      >
+                        <Brain className="w-3 h-3 shrink-0" />
+                        {isExpanded ? (
+                          <ChevronDown className="w-3 h-3 shrink-0" />
+                        ) : (
+                          <ChevronRight className="w-3 h-3 shrink-0" />
+                        )}
+                        <span className="font-medium">Agent Thinking</span>
+                        {!isExpanded && (
+                          <span className="truncate opacity-60 ml-1">
+                            {log.text.slice(0, 80)}...
+                          </span>
+                        )}
+                      </button>
+                      {isExpanded && (
+                        <div className="ml-5 mt-1 pl-3 border-l border-[#EAEFEF]/10 text-[#EAEFEF]/50 text-xs whitespace-pre-wrap leading-relaxed">
+                          {log.text}
+                        </div>
+                      )}
+                    </div>
+                  );
+
+                case "model_thinking":
+                  const isThinkingExpanded = expandedThoughts.has(idx);
+                  return (
+                    <div key={idx} className="group">
+                      <button
+                        onClick={() =>
+                          setExpandedThoughts((prev) => {
+                            const next = new Set(prev);
+                            next.has(idx) ? next.delete(idx) : next.add(idx);
+                            return next;
+                          })
+                        }
+                        className="flex items-center gap-2 text-purple-400/70 hover:text-purple-400 transition-colors text-xs w-full text-left"
+                      >
+                        <Brain className="w-3 h-3 shrink-0" />
+                        {isThinkingExpanded ? (
+                          <ChevronDown className="w-3 h-3 shrink-0" />
+                        ) : (
+                          <ChevronRight className="w-3 h-3 shrink-0" />
+                        )}
+                        <span className="font-medium">Model Internal Thinking</span>
+                        {!isThinkingExpanded && (
+                          <span className="truncate opacity-60 ml-1">
+                            {log.text.slice(0, 80)}...
+                          </span>
+                        )}
+                      </button>
+                      {isThinkingExpanded && (
+                        <div className="ml-5 mt-1 pl-3 border-l-2 border-purple-500/30 text-purple-400/80 text-xs whitespace-pre-wrap leading-relaxed overflow-x-auto">
+                          {log.text}
+                        </div>
+                      )}
+                    </div>
+                  );
+
+                case "tool_call":
+                  return (
+                    <div key={idx} className="mt-3 flex items-center gap-2">
+                      <TerminalIcon className="w-3.5 h-3.5 text-green-400 shrink-0" />
+                      <span className="text-green-400 text-xs font-semibold uppercase tracking-wider">
+                        Using Tool:
+                      </span>
+                      <span className="text-green-300 text-sm font-medium">
+                        {log.tool}
+                      </span>
+                    </div>
+                  );
+
+                case "tool_input":
+                  return (
+                    <div
+                      key={idx}
+                      className="ml-5 bg-white/5 border border-white/10 rounded-lg p-2 font-mono text-xs text-[#EAEFEF]/70 whitespace-pre-wrap break-all max-h-32 overflow-y-auto custom-scrollbar"
+                    >
+                      {log.input}
+                    </div>
+                  );
+
+                case "tool_result":
+                  return (
+                    <div
+                      key={idx}
+                      className={`ml-5 mb-2 rounded-lg border overflow-hidden ${
+                        log.success
+                          ? "border-green-500/30"
+                          : "border-red-500/40"
+                      }`}
+                    >
+                      {/* Result header */}
+                      <div
+                        className={`flex items-center gap-2 px-3 py-1.5 text-xs ${
+                          log.success
+                            ? "bg-green-500/10 text-green-400"
+                            : "bg-red-500/10 text-red-400"
+                        }`}
+                      >
+                        {log.success ? (
+                          <CheckCircle className="w-3 h-3" />
+                        ) : (
+                          <XCircle className="w-3 h-3" />
+                        )}
+                        <span className="font-semibold">
+                          {log.success ? "SUCCESS" : "FAILED"}
+                        </span>
+                        {log.tool === "terminal" && log.exit_code !== null && (
+                          <span className="opacity-60">
+                            Exit code {log.exit_code}
+                          </span>
+                        )}
+                        {log.cwd && (
+                          <span className="ml-auto bg-black/30 px-2 py-0.5 rounded text-[10px] text-[#EAEFEF]/50 font-mono">
+                            {log.cwd}
+                          </span>
+                        )}
+                      </div>
+                      {/* Command */}
+                      {log.cmd && (
+                        <div className="px-3 py-1.5 bg-black/30 border-b border-white/5 font-mono text-xs text-green-400">
+                          $ {log.cmd}
+                        </div>
+                      )}
+                      {/* Stdout */}
+                      {log.stdout && (
+                        <div className="px-3 py-2 font-mono text-[11px] text-[#EAEFEF]/70 whitespace-pre-wrap max-h-48 overflow-y-auto custom-scrollbar bg-black/20">
+                          {log.stdout}
+                        </div>
+                      )}
+                      {/* Stderr */}
+                      {log.stderr && (
+                        <div className="px-3 py-2 font-mono text-[11px] text-red-400/80 whitespace-pre-wrap max-h-32 overflow-y-auto custom-scrollbar bg-red-500/5 border-t border-red-500/20">
+                          {log.stderr}
+                        </div>
+                      )}
+                    </div>
+                  );
+
+                case "final_answer":
+                  return (
+                    <div
+                      key={idx}
+                      className="mt-3 bg-[#FF9B51]/20 border border-[#FF9B51]/40 rounded-lg p-3"
+                    >
+                      <div className="flex items-center gap-2 text-xs text-[#FF9B51] font-semibold mb-1">
+                        <Sparkles className="w-3 h-3" /> Agent Summary
+                      </div>
+                      <div className="text-sm text-[#EAEFEF]/90 whitespace-pre-wrap">
+                        {log.text}
+                      </div>
+                    </div>
+                  );
+
+                case "system":
+                  const colorMap = {
+                    info: "text-blue-400",
+                    warn: "text-yellow-400",
+                    error: "text-red-400",
+                  };
+                  const bgMap = {
+                    info: "bg-blue-500/5",
+                    warn: "bg-yellow-500/5",
+                    error: "bg-red-500/10",
+                  };
+                  return (
+                    <div
+                      key={idx}
+                      className={`flex items-center gap-2 px-2 py-1 rounded text-xs font-medium ${
+                        colorMap[log.level]
+                      } ${bgMap[log.level]} mt-1`}
+                    >
+                      {log.level === "error" ? (
+                        <XCircle className="w-3 h-3" />
+                      ) : log.level === "warn" ? (
+                        <AlertTriangle className="w-3 h-3" />
+                      ) : (
+                        <TerminalSquare className="w-3 h-3" />
+                      )}
+                      {log.text}
+                    </div>
+                  );
+
+                case "log":
+                  return (
+                    <div
+                      key={idx}
+                      className="text-xs text-[#EAEFEF]/50 whitespace-pre-wrap pl-2"
+                    >
+                      {log.text}
+                    </div>
+                  );
+
+                case "cmd_start":
+                  return (
+                    <div
+                      key={idx}
+                      className="mt-3 bg-black/30 border border-white/10 rounded-lg overflow-hidden"
+                    >
+                      <div className="flex items-center gap-2 px-3 py-1.5">
+                        <TerminalIcon className="w-3 h-3 text-green-400" />
+                        <span className="text-green-400 font-mono text-xs font-medium">
+                          $ {log.cmd}
+                        </span>
+                        <span className="ml-auto bg-black/30 px-2 py-0.5 rounded text-[10px] text-[#EAEFEF]/40 font-mono">
+                          {log.cwd}
+                        </span>
+                      </div>
+                    </div>
+                  );
+
+                case "cmd_output":
+                  return (
+                    <div
+                      key={idx}
+                      className={`pl-5 font-mono text-[11px] whitespace-pre-wrap ${
+                        log.stream === "stderr"
+                          ? "text-red-400/70"
+                          : "text-[#EAEFEF]/60"
+                      }`}
+                    >
+                      {log.line}
+                    </div>
+                  );
+
+                case "cmd_end":
+                  return (
+                    <div
+                      key={idx}
+                      className={`pl-5 flex items-center gap-1.5 text-[10px] font-medium mt-0.5 mb-1 ${
+                        log.success ? "text-green-500/70" : "text-red-400"
+                      }`}
+                    >
+                      {log.success ? (
+                        <CheckCircle className="w-2.5 h-2.5" />
+                      ) : (
+                        <XCircle className="w-2.5 h-2.5" />
+                      )}
+                      {log.success ? "Done" : `Failed (exit ${log.exit_code})`}
+                    </div>
+                  );
+
+                default:
+                  return null;
+              }
+            })}
+
+            {/* Auto-scroll anchor */}
+            <div ref={logsEndRef} />
+
+            {/* HITL Action Block */}
+            {pendingCommand && (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="sticky bottom-4 mx-4 bg-[#FF9B51]/20 border border-[#FF9B51]/50 backdrop-blur-md rounded-xl p-4 shadow-2xl z-10"
+              >
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="w-5 h-5 text-yellow-500 shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <h4 className="text-sm font-semibold text-[#EAEFEF]">
+                      Action Required
+                    </h4>
+                    <p className="text-xs text-[#EAEFEF]/70 mt-1 mb-3">
+                      The agent wants to execute the following operation:
+                    </p>
+                    <div className="bg-black/50 p-2 rounded border border-[#EAEFEF]/10 font-mono text-[10px] text-green-400 break-all mb-4 whitespace-pre-wrap max-h-40 overflow-y-auto custom-scrollbar">
+                      {pendingCommand}
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="Optional reason for rejection (e.g. 'Use npm instead of yarn')"
+                      value={rejectReason}
+                      onChange={(e) => setRejectReason(e.target.value)}
+                      className="w-full bg-black/40 border border-white/10 rounded px-3 py-1.5 text-xs text-white mb-4 focus:outline-none focus:ring-1 focus:ring-red-500/50 placeholder:text-white/30"
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => handleCommandApproval(true)}
+                        className="flex-1 py-1.5 bg-green-500/20 text-green-400 hover:bg-green-500/30 border border-green-500/50 rounded flex items-center justify-center gap-1 text-xs font-semibold transition-colors"
+                      >
+                        <CheckCircle className="w-3.5 h-3.5" /> Approve Action
+                      </button>
+                      <button
+                        onClick={() => handleCommandApproval(false)}
+                        className="flex-1 py-1.5 bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/50 rounded flex items-center justify-center gap-1 text-xs font-semibold transition-colors"
+                      >
+                        <XCircle className="w-3.5 h-3.5" /> Reject & Rethink
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </div>
+        </div>
+      </motion.div>
+    </AnimatePresence>
+  );
+}

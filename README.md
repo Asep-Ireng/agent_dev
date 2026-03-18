@@ -28,15 +28,15 @@ FastAPI server with all endpoints and agent orchestration.
 
 All tools available to the dev and iterate agents:
 
-| Tool                    | What it does                                                                                                                               |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `TerminalExecutionTool` | Runs shell commands with real-time output streaming, approval flow, timeout (300s), and **output truncation** (5K char cap to save tokens) |
-| `WriteFileTool`         | Creates/overwrites files in the workspace                                                                                                  |
-| `ReadFileTool`          | Reads files with optional line range                                                                                                       |
-| `ReplaceInFileTool`     | Find-and-replace exact text in a file                                                                                                      |
-| `EditFileLinesTool`     | Replace a specific line range                                                                                                              |
-| `InsertAtLineTool`      | Insert content before a specific line                                                                                                      |
-| `ReportTaskStatusTool`  | LLM self-reports task status (`success`/`failed`/`partial`) before finishing                                                               |
+| Tool                    | What it does                                                                                                                              |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `TerminalExecutionTool` | Runs shell commands with real-time output streaming, approval flow, timeout (300s), and**output truncation** (5K char cap to save tokens) |
+| `WriteFileTool`         | Creates/overwrites files in the workspace                                                                                                 |
+| `ReadFileTool`          | Reads files with optional line range                                                                                                      |
+| `ReplaceInFileTool`     | Find-and-replace exact text in a file                                                                                                     |
+| `EditFileLinesTool`     | Replace a specific line range                                                                                                             |
+| `InsertAtLineTool`      | Insert content before a specific line                                                                                                     |
+| `ReportTaskStatusTool`  | LLM self-reports task status (`success`/`failed`/`partial`) before finishing                                                              |
 
 ---
 
@@ -52,17 +52,22 @@ Single tool for the design chat agent:
 
 ## Frontend (`frontend/src/app/`)
 
-### [page.tsx](frontend/src/app/page.tsx) — Single-Page App
+### Components (`frontend/src/app/components/`)
 
-The entire UI in one file. Key sections:
+Our UI has been extracted into modular components, managed by the root `page.tsx`:
 
-| Section               | What it does                                                                                  |
-| --------------------- | --------------------------------------------------------------------------------------------- |
-| **Sidebar**           | Provider/model/API key selection, workspace path, HITL toggle (live-toggleable)               |
-| **Design Tab**        | Chat with the design agent, attach files (PDFs, images, clipboard paste), spec preview/editor |
-| **Develop Tab**       | "Build from Spec" button, live terminal stream, tool result cards, agent thoughts             |
-| **Dev Chat Panel**    | Ask/Apply mode toggle, chat with LLM about the code, Proceed/Cancel for Apply mode            |
-| **Scroll-to-top FAB** | Floating button bottom-right for long terminal output                                         |
+| Component         | What it does                                                            |
+| ----------------- | ----------------------------------------------------------------------- |
+| `Sidebar.tsx`     | Provider/model selection, workspace path, HITL toggle (live-toggleable) |
+| `DesignChat.tsx`  | Chat with the design agent, attach files (PDFs, images)                 |
+| `SpecViewer.tsx`  | Specification preview and raw editor                                    |
+| `Terminal.tsx`    | Live terminal stream, tool result cards, agent thoughts                 |
+| `AgentResult.tsx` | Output from the last dev run                                            |
+| `DevChat.tsx`     | Ask/Apply mode toggle, chat with LLM about the code, Proceed/Cancel     |
+
+### [page.tsx](frontend/src/app/page.tsx) — State Container
+
+The main page acts as the master state controller and layout provider, managing state for all child components.
 
 **Key state:**
 
@@ -70,8 +75,7 @@ The entire UI in one file. Key sections:
 - `agentResult` — output from the last dev run (passed as `dev_context` to iterate agent)
 - `pendingApplyTask` — holds the agent's proposed plan in Apply mode until user approves
 - `requireApproval` — HITL toggle, live-synced to backend via `/api/develop/toggle-approval`
-
-### [globals.css](frontend/src/app/globals.css) — Global Styles
+- `actionLogs` — parsed SSE stream for the Terminal component### [globals.css](frontend/src/app/globals.css) — Global Styles
 
 Custom color palette, Tailwind imports, base styling.
 

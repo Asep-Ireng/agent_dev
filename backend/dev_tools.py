@@ -93,7 +93,10 @@ class ReportTaskStatusSchema(BaseModel):
 class TerminalExecutionTool(BaseTool):
     name: str = "Execute Terminal Command"
     description: str = (
-        "Executes a shell command in the specified workspace directory and returns the stdout and stderr."
+        "Executes a shell command in the specified workspace directory and returns the stdout and stderr.\n"
+        "ENVIRONMENT: You are on Windows (cmd/PowerShell) - use Windows commands. NEVER run recursive directory listings like 'dir /s'. Use 'dir' (without /s).\n"
+        "When scaffolding projects, ALWAYS use non-interactive flags (e.g. 'npx -y ...', 'npm init -y'). NEVER run interactive prompts.\n"
+        "PRE-COMPLETION VERIFICATION: Test-run the application before finishing to verify it works (e.g. 'npm run dev' with a timeout), fix any errors, and kill the dev server."
     )
     args_schema: type[BaseModel] = TerminalExecutionSchema
     workspace_path: str = "./workspace"
@@ -218,7 +221,8 @@ class TerminalExecutionTool(BaseTool):
 class WriteFileTool(BaseTool):
     name: str = "Write File"
     description: str = (
-        "Writes content to a file in the workspace directory. Automatically creates parent directories if they don't exist."
+        "Writes content to a file in the workspace directory. Automatically creates parent directories if they don't exist.\n"
+        "ALWAYS use this tool to save NEW source code. Do NOT use echo or cat to write blocks of code in the terminal."
     )
     args_schema: type[BaseModel] = WriteFileSchema
     workspace_path: str = "./workspace"
@@ -261,7 +265,8 @@ class WriteFileTool(BaseTool):
 class ReadFileTool(BaseTool):
     name: str = "Read File"
     description: str = (
-        "Reads the content of a file in the workspace. You can optionally specify a line range. Use this BEFORE editing files to understand their current content."
+        "Reads the content of a file in the workspace. You can optionally specify a line range.\n"
+        "When you need to EDIT an existing file, you MUST ALWAYS use Read File first to see the current content and exact line numbers."
     )
     args_schema: type[BaseModel] = ReadFileSchema
     workspace_path: str = "./workspace"
@@ -305,7 +310,8 @@ class ReadFileTool(BaseTool):
 class ReplaceInFileTool(BaseTool):
     name: str = "Replace In File"
     description: str = (
-        "Finds and replaces an exact text match in a file. Use this to edit existing files without rewriting the whole file. You MUST use the Read File tool first to see the exact content, then provide the exact old_text to match. If the old_text is not found exactly, the operation will fail."
+        "Finds and replaces an exact text match in a file. Use this if you have a unique text snippet to match without rewriting the whole file.\n"
+        "You MUST use the Read File tool first to see the exact content. If the old_text is not found exactly, the operation will fail."
     )
     args_schema: type[BaseModel] = ReplaceInFileSchema
     workspace_path: str = "./workspace"
@@ -364,7 +370,8 @@ class ReplaceInFileTool(BaseTool):
 class EditFileLinesTool(BaseTool):
     name: str = "Edit File Lines"
     description: str = (
-        "Replaces a specific range of lines in a file with new content. Use this for surgical edits. You MUST use Read File first to get the correct line numbers."
+        "Replaces a specific range of lines in a file with new content. Use this for surgical edits.\n"
+        "Never rewrite a whole file just to change a few lines. You MUST use Read File first to get the correct line numbers."
     )
     args_schema: type[BaseModel] = EditFileLinesSchema
     workspace_path: str = "./workspace"
@@ -422,7 +429,7 @@ class EditFileLinesTool(BaseTool):
 class InsertAtLineTool(BaseTool):
     name: str = "Insert At Line"
     description: str = (
-        "Inserts content at a specific line number (before the existing line). Use this to add code without affecting existing lines."
+        "Inserts content at a specific line number (before the existing line). Use this to add code at a specific position without affecting existing lines."
     )
     args_schema: type[BaseModel] = InsertAtLineSchema
     workspace_path: str = "./workspace"
@@ -479,7 +486,8 @@ class InsertAtLineTool(BaseTool):
 class ReportTaskStatusTool(BaseTool):
     name: str = "Report Task Status"
     description: str = (
-        "Call this tool BEFORE giving your Final Answer to report whether the task succeeded, failed, or partially completed. This is MANDATORY — always call this before finishing."
+        "Call this tool BEFORE giving your Final Answer to report whether the task succeeded, failed, or partially completed.\n"
+        "This is MANDATORY - always call this before finishing. IMPORTANT: Do this only AFTER verification."
     )
     args_schema: type[BaseModel] = ReportTaskStatusSchema
     result_holder: dict = {}

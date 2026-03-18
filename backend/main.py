@@ -10,8 +10,9 @@ import threading
 import queue
 import asyncio
 import traceback
+import yaml
 from PyPDF2 import PdfReader
-from crewai import Agent, Task, Crew
+from crewai import Agent, Task, Crew, LLM
 from fastapi.responses import StreamingResponse
 from dev_tools import (
     TerminalExecutionTool,
@@ -44,6 +45,7 @@ runtime_settings = {
     "provider": os.getenv("DEFAULT_PROVIDER", "Google (Gemini)"),
     "google_model": os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"),
     "openai_model": os.getenv("OPENAI_MODEL", "gpt-4o"),
+    "thinking_level": os.getenv("THINKING_LEVEL", "none"),
 }
 
 # Base workspace directory — all workspace_path values must resolve inside this
@@ -173,6 +175,7 @@ class IterateRequest(BaseModel):
 class SettingsUpdate(BaseModel):
     provider: str | None = None
     model: str | None = None
+    thinking_level: str | None = None
 
 
 # ==================================
@@ -188,6 +191,7 @@ async def get_settings():
         "model": get_current_model(),
         "google_model": runtime_settings["google_model"],
         "openai_model": runtime_settings["openai_model"],
+        "thinking_level": runtime_settings["thinking_level"],
         "available_providers": ["OpenAI", "Google (Gemini)"],
         "workspace_path": BASE_WORKSPACE_DIR,
     }
@@ -207,10 +211,13 @@ async def update_settings(req: SettingsUpdate):
             runtime_settings["openai_model"] = req.model
         else:
             runtime_settings["google_model"] = req.model
+    if req.thinking_level is not None:
+        runtime_settings["thinking_level"] = req.thinking_level
     return {
         "status": "ok",
         "provider": get_current_provider(),
         "model": get_current_model(),
+        "thinking_level": runtime_settings["thinking_level"],
     }
 
 
@@ -262,10 +269,11 @@ async def generate_design_chat(
         spec_result = {}
         update_spec_tool = UpdateSpecTool(result_holder=spec_result)
 
+        with open(os.path.join(os.path.dirname(__file__), "config", "agents.yaml"), "r", encoding="utf-8") as f:
+            agents_config = yaml.safe_load(f)
+
         designer = Agent(
-            role="Lead Product Designer",
-            goal="Design and aggressively iterate on a comprehensive app technical spec based on user chat and file uploads.",
-            backstory="You are a visionary Product Manager. You take rough ideas, uploaded context (like PDFs), and output pristine Markdown architecture specs. You MUST always use the 'Update Specification' tool to save your work — never just output raw markdown. Always include a clear change_summary explaining what you added, modified, or removed.",
+            **agents_config["designer"],
             verbose=True,
             allow_delegation=False,
             llm=get_llm(model, provider),
@@ -451,6 +459,7 @@ async def generate_code_stream(req: DevelopRequest):
 
         def __init__(self):
             self.buffer = ""
+            self.in_thinking = False
 
         def write(self, text):
             if not text or not text.strip():
@@ -458,6 +467,23 @@ async def generate_code_stream(req: DevelopRequest):
 
             clean = _strip_ansi(text)
             if not clean:
+                return
+
+            if "<think>" in clean:
+                self.in_thinking = True
+                clean = clean.replace("<think>", "").strip()
+                if not clean:
+                    return
+            
+            if "</think>" in clean:
+                self.in_thinking = False
+                clean = clean.replace("</think>", "").strip()
+                if clean:
+                    _emit(q, "model_thinking", {"text": clean})
+                return
+
+            if self.in_thinking:
+                _emit(q, "model_thinking", {"text": clean})
                 return
 
             # --- Detect CrewAI ReAct patterns ---
@@ -709,14 +735,25 @@ async def generate_code_stream(req: DevelopRequest):
                 if "[FAILED]" in output_str or "[DENIED]" in output_str:
                     error_count[0] += 1
 
+            with open(os.path.join(os.path.dirname(__file__), "config", "agents.yaml"), "r", encoding="utf-8") as f:
+                agents_config = yaml.safe_load(f)
+
+            thinking_level = runtime_settings.get("thinking_level", "none")
+            llm_kwargs = {}
+            if provider == "Google (Gemini)" and thinking_level != "none" and "gemini" in model:
+                llm_kwargs["reasoning_effort"] = thinking_level
+
+            my_llm = LLM(
+                model=get_llm(model, provider),
+                **llm_kwargs
+            )
+
             developer = Agent(
-                role="Autonomous Principal Developer",
-                goal="Build and execute the provided application spec directly in the filesystem.",
-                backstory="You are a 10x systems engineer who builds applications entirely using the terminal. ENVIRONMENT: You are on Windows (cmd/PowerShell) — use Windows commands (dir, mkdir, del, copy, type) NOT Unix commands (ls, rm, cp, cat). NEVER run recursive directory listings like 'dir /s' or 'tree' — they dump thousands of files from node_modules and are useless. Use 'dir' (without /s) to see just the top-level contents of a folder. IMPORTANT: Before doing ANYTHING else, you MUST create a dedicated project folder inside the workspace (e.g. 'mkdir my-app-name') and do ALL your work inside that folder. This keeps the workspace clean when multiple projects exist. When scaffolding projects with npx, npm, or any CLI tools, ALWAYS use non-interactive flags (e.g. 'npx -y create-next-app@latest ./my-app --yes --typescript --eslint --tailwind --app --src-dir --no-import-alias', 'npm init -y', 'npx -y create-vite@latest ./my-app -- --template react-ts'). NEVER run interactive prompts — they will hang and timeout. You use your Execute Terminal Command tool to create directories, install dependencies, and run scripts. You ALWAYS use your Write File tool to save NEW source code into files. Do NOT use echo or cat to write long blocks of code into files, use Write File instead. When you need to EDIT an existing file, ALWAYS use Read File first to see the current content and line numbers. For targeted edits, use Edit File Lines (to replace a specific line range) or Insert At Line (to add code at a specific position). Use Replace In File if you have a unique text snippet to match. Never rewrite a whole file just to change a few lines. PRE-COMPLETION VERIFICATION: Before giving your Final Answer, you MUST test-run the application to verify it works. Start the app (e.g. 'npm run dev', 'npm start', 'python app.py', etc.) with a short timeout (10-15 seconds) and check the output for compilation errors, crashes, or missing dependencies. If you find errors, fix them and test again. Once verified, kill the dev server process (use Ctrl+C, taskkill, or just let the timeout end) before proceeding. IMPORTANT: After verification, you MUST call the 'Report Task Status' tool to indicate whether the task succeeded, failed, or partially completed.",
+                **agents_config["developer"],
                 verbose=True,
                 allow_delegation=False,
                 max_iter=75,
-                llm=get_llm(model, provider),
+                llm=my_llm,
                 tools=[
                     terminal_tool,
                     write_file_tool,
@@ -809,6 +846,7 @@ async def dev_iterate(req: IterateRequest):
     class StreamCatcher:
         def __init__(self):
             self.buffer = ""
+            self.in_thinking = False
 
         def write(self, text):
             if not text or not text.strip():
@@ -816,6 +854,23 @@ async def dev_iterate(req: IterateRequest):
 
             clean = _strip_ansi(text)
             if not clean:
+                return
+
+            if "<think>" in clean:
+                self.in_thinking = True
+                clean = clean.replace("<think>", "").strip()
+                if not clean:
+                    return
+            
+            if "</think>" in clean:
+                self.in_thinking = False
+                clean = clean.replace("</think>", "").strip()
+                if clean:
+                    _emit(q, "model_thinking", {"text": clean})
+                return
+
+            if self.in_thinking:
+                _emit(q, "model_thinking", {"text": clean})
                 return
 
             if clean.startswith("Agent:") or clean.startswith("## Agent:"):
@@ -1002,14 +1057,25 @@ async def dev_iterate(req: IterateRequest):
                 if "[FAILED]" in output_str or "[DENIED]" in output_str:
                     error_count[0] += 1
 
+            with open(os.path.join(os.path.dirname(__file__), "config", "agents.yaml"), "r", encoding="utf-8") as f:
+                agents_config = yaml.safe_load(f)
+
+            thinking_level = runtime_settings.get("thinking_level", "none")
+            llm_kwargs = {}
+            if provider == "Google (Gemini)" and thinking_level != "none" and "gemini" in model:
+                llm_kwargs["reasoning_effort"] = thinking_level
+
+            my_llm = LLM(
+                model=get_llm(model, provider),
+                **llm_kwargs
+            )
+
             iterator = Agent(
-                role="Iterative Developer",
-                goal="Apply the requested changes to the existing project.",
-                backstory="You are iterating on an existing project. ENVIRONMENT: You are on Windows (cmd/PowerShell) — use Windows commands (dir, mkdir, del, copy, type) NOT Unix commands (ls, rm, cp, cat). NEVER run recursive directory listings like 'dir /s' or 'tree' — they dump thousands of files from node_modules and are useless. Use 'dir' (without /s) to see just the top-level contents of a folder. The project was built according to a spec and already exists in the workspace. Your job is to make the specific changes the user requested. ALWAYS use Read File first to understand the current state of relevant files before making edits. For targeted edits, use Edit File Lines (to replace a specific line range) or Insert At Line (to add code at a specific position). Use Replace In File if you have a unique text snippet to match. Use Write File only for creating new files. Use the terminal for installing dependencies, running builds, or testing. Never rewrite a whole file just to change a few lines. PRE-COMPLETION VERIFICATION: Before giving your Final Answer, you MUST test-run the application to verify your changes work. Start the app (e.g. 'npm run dev', 'npm start', 'python app.py', etc.) with a short timeout (10-15 seconds) and check the output for compilation errors, crashes, or missing dependencies. If you find errors, fix them and test again. Once verified, kill the dev server process (use Ctrl+C, taskkill, or just let the timeout end) before proceeding. IMPORTANT: After verification, you MUST call the 'Report Task Status' tool to indicate whether the task succeeded, failed, or partially completed.",
+                **agents_config["iterative_developer"],
                 verbose=True,
                 allow_delegation=False,
                 max_iter=50,
-                llm=get_llm(model, provider),
+                llm=my_llm,
                 tools=[
                     terminal_tool,
                     write_file_tool,
