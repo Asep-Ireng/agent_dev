@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from "react";
+import React, { useRef, useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   TerminalSquare,
@@ -38,11 +38,26 @@ export default function Terminal({
   setExpandedThoughts,
 }: TerminalProps) {
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const [expandedResults, setExpandedResults] = useState<Set<number>>(new Set());
 
-  // Auto-scroll terminal to bottom when new logs arrive
+  // Auto-scroll terminal to bottom when new logs arrive (if autoScroll is active)
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [actionLogs, pendingCommand]);
+    if (autoScroll) {
+      logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [actionLogs, pendingCommand, autoScroll]);
+
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const target = e.currentTarget;
+    // Detect if user is scrolled to the bottom (within 20px buffer)
+    const isAtBottom = target.scrollHeight - target.scrollTop - target.clientHeight < 20;
+    if (isAtBottom && !autoScroll) {
+      setAutoScroll(true);
+    } else if (!isAtBottom && autoScroll) {
+      setAutoScroll(false);
+    }
+  };
 
   if (actionLogs.length === 0 && !developerLoading) return null;
 
@@ -75,7 +90,7 @@ export default function Terminal({
         </div>
 
         {/* Terminal Window Block */}
-        <div className="bg-[#0A0A0B] border border-[#F4F4F6]/10 rounded-2xl shadow-2xl overflow-hidden font-mono text-sm leading-relaxed h-[400px] flex flex-col">
+        <div className="bg-[#0A0A0B] border border-[#F4F4F6]/10 rounded-2xl shadow-2xl overflow-hidden font-mono text-sm leading-relaxed h-[400px] flex flex-col relative">
           {/* Mac style OS header */}
           <div className="flex gap-2 p-3 bg-white/5 border-b border-white/5 items-center">
             <div className="w-3 h-3 rounded-full bg-red-500/80"></div>
@@ -87,7 +102,10 @@ export default function Terminal({
           </div>
 
           {/* Streaming Logs */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-2 custom-scrollbar text-[#F4F4F6]/80 relative">
+          <div 
+            onScroll={handleScroll}
+            className="flex-1 overflow-y-auto p-4 space-y-2 custom-scrollbar text-[#F4F4F6]/80"
+          >
             {actionLogs.map((log, idx) => {
               switch (log.type) {
                 case "thought":
@@ -184,10 +202,29 @@ export default function Terminal({
                   );
 
                 case "tool_result":
+                  const isResultExpanded = expandedResults.has(idx);
                   return (
                     <div
                       key={idx}
-                      className={`ml-5 mb-2 rounded-lg border overflow-hidden ${
+                      onClick={(e) => {
+                        const selection = window.getSelection();
+                        if (selection && selection.toString()) return;
+                        
+                        if (
+                          (e.target as HTMLElement).closest(".stdout-container") ||
+                          (e.target as HTMLElement).closest(".stderr-container")
+                        ) {
+                          return;
+                        }
+                        
+                        setAutoScroll(false);
+                        setExpandedResults((prev) => {
+                          const next = new Set(prev);
+                          next.has(idx) ? next.delete(idx) : next.add(idx);
+                          return next;
+                        });
+                      }}
+                      className={`ml-5 mb-2 rounded-lg border overflow-hidden transition-all duration-200 cursor-pointer hover:bg-white/[0.02] ${
                         log.success
                           ? "border-green-500/30"
                           : "border-red-500/40"
@@ -195,49 +232,68 @@ export default function Terminal({
                     >
                       {/* Result header */}
                       <div
-                        className={`flex items-center gap-2 px-3 py-1.5 text-xs ${
+                        className={`flex items-center gap-2 px-3 py-1.5 text-xs select-none ${
                           log.success
                             ? "bg-green-500/10 text-green-400"
                             : "bg-red-500/10 text-red-400"
                         }`}
                       >
                         {log.success ? (
-                          <CheckCircle className="w-3 h-3" />
+                          <CheckCircle className="w-3 h-3 shrink-0" />
                         ) : (
-                          <XCircle className="w-3 h-3" />
+                          <XCircle className="w-3 h-3 shrink-0" />
                         )}
                         <span className="font-semibold">
                           {log.success ? "SUCCESS" : "FAILED"}
                         </span>
                         {log.tool === "terminal" && log.exit_code !== null && (
-                          <span className="opacity-60">
+                          <span className="opacity-60 shrink-0">
                             Exit code {log.exit_code}
                           </span>
                         )}
+                        
+                        <span className="opacity-40 text-[9px] uppercase font-mono tracking-wider ml-2 shrink-0">
+                          {isResultExpanded ? "[- Collapse]" : "[+ Expand details]"}
+                        </span>
+
                         {log.cwd && (
-                          <span className="ml-auto bg-black/30 px-2 py-0.5 rounded text-[10px] text-[#F4F4F6]/50 font-mono">
+                          <span className="ml-auto bg-black/30 px-2 py-0.5 rounded text-[10px] text-[#F4F4F6]/50 font-mono truncate max-w-[200px]">
                             {log.cwd}
                           </span>
                         )}
                       </div>
                       {/* Command */}
                       {log.cmd && (
-                        <div className="px-3 py-1.5 bg-black/30 border-b border-white/5 font-mono text-xs text-green-400">
+                        <div className="px-3 py-1.5 bg-black/30 border-b border-white/5 font-mono text-xs text-green-400 select-none">
                           $ {log.cmd}
                         </div>
                       )}
-                      {/* Stdout */}
-                      {log.stdout && (
-                        <div className="px-3 py-2 font-mono text-[11px] text-[#F4F4F6]/70 whitespace-pre-wrap max-h-48 overflow-y-auto custom-scrollbar bg-black/20">
-                          {log.stdout}
-                        </div>
-                      )}
-                      {/* Stderr */}
-                      {log.stderr && (
-                        <div className="px-3 py-2 font-mono text-[11px] text-red-400/80 whitespace-pre-wrap max-h-32 overflow-y-auto custom-scrollbar bg-red-500/5 border-t border-red-500/20">
-                          {log.stderr}
-                        </div>
-                      )}
+                      
+                      {/* Output containers (expanded only) */}
+                      <AnimatePresence initial={false}>
+                        {isResultExpanded && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: "auto", opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.2 }}
+                            className="overflow-hidden"
+                          >
+                            {/* Stdout */}
+                            {log.stdout && (
+                              <div className="stdout-container px-3 py-2 font-mono text-[11px] text-[#F4F4F6]/70 whitespace-pre-wrap max-h-48 overflow-y-auto custom-scrollbar bg-black/20">
+                                {log.stdout}
+                              </div>
+                            )}
+                            {/* Stderr */}
+                            {log.stderr && (
+                              <div className="stderr-container px-3 py-2 font-mono text-[11px] text-red-400/80 whitespace-pre-wrap max-h-32 overflow-y-auto custom-scrollbar bg-red-500/5 border-t border-red-500/20">
+                                {log.stderr}
+                              </div>
+                            )}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
                     </div>
                   );
 
@@ -397,6 +453,27 @@ export default function Terminal({
               </motion.div>
             )}
           </div>
+
+          {/* Resume Auto-Scroll Button */}
+          <AnimatePresence>
+            {!autoScroll && (
+              <div className="absolute bottom-4 right-4 z-20">
+                <motion.button
+                  initial={{ opacity: 0, y: 10, scale: 0.9 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 10, scale: 0.9 }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setAutoScroll(true);
+                    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-[#E51937] hover:bg-[#E51937]/90 text-[#0F0F11] font-semibold font-mono text-[11px] rounded-full shadow-lg shadow-black/60 transition-all active:scale-95 border border-[#E51937]/35 animate-none"
+                >
+                  <ChevronDown className="w-3.5 h-3.5" /> Resume Auto-Scroll
+                </motion.button>
+              </div>
+            )}
+          </AnimatePresence>
         </div>
       </motion.div>
     </AnimatePresence>

@@ -119,7 +119,7 @@ def validate_chat_history(history_json: str) -> list:
     """Parse and validate chat history JSON. Returns list of validated messages."""
     import json as _json_mod
 
-    MAX_CONTENT_LENGTH = 50000
+    MAX_CONTENT_LENGTH = 4000
     ALLOWED_ROLES = {"user", "assistant"}
 
     if not history_json:
@@ -222,6 +222,23 @@ async def update_settings(req: SettingsUpdate):
     }
 
 
+@app.get("/api/workspace/diff")
+async def get_workspace_diff(workspace_path: str = BASE_WORKSPACE_DIR):
+    import subprocess
+    try:
+        ws = validate_workspace_path(workspace_path)
+        res = subprocess.run(
+            "git diff --relative",
+            shell=True,
+            cwd=ws,
+            text=True,
+            capture_output=True,
+        )
+        return {"diff": res.stdout}
+    except Exception as e:
+        return {"diff": "", "error": str(e)}
+
+
 @app.post("/api/design/chat")
 async def generate_design_chat(
     idea: str = Form(...), spec: str = Form(""), files: List[UploadFile] = File(None)
@@ -290,15 +307,28 @@ async def generate_design_chat(
         crew = Crew(agents=[designer], tasks=[design_task])
         result = crew.kickoff()
 
+        metrics = {}
+        if hasattr(crew, "usage_metrics") and crew.usage_metrics:
+            metrics = {
+                "prompt_tokens": crew.usage_metrics.get("prompt_tokens", 0),
+                "completion_tokens": crew.usage_metrics.get("completion_tokens", 0),
+                "total_tokens": crew.usage_metrics.get("total_tokens", 0),
+            }
+
         # Read from shared dict if tool was called, fall back to raw output
         if spec_result.get("spec"):
             return {
                 "spec": spec_result["spec"],
                 "summary": spec_result.get("summary", "Specification updated."),
+                "usage": metrics,
             }
         else:
             raw_output = result.raw if hasattr(result, "raw") else str(result)
-            return {"spec": raw_output, "summary": "Specification generated."}
+            return {
+                "spec": raw_output,
+                "summary": "Specification generated.",
+                "usage": metrics,
+            }
 
     except Exception as e:
         print(f"Server Error during Design Chat: {traceback.format_exc()}")
@@ -326,7 +356,26 @@ async def dev_chat(
 
         # Validate inputs
         ws = validate_workspace_path(workspace_path)
-        chat_history = validate_chat_history(history)
+        chat_history_raw = validate_chat_history(history)
+
+        # Filter and cap history to prevent token explosion (e.g. recursive build results)
+        chat_history = []
+        for msg in chat_history_raw:
+            content = msg["content"]
+            # Skip massive changes-applied logs or UI control messages in LLM history
+            if (
+                content.startswith("✅ **Changes Applied:**")
+                or content.startswith("▶ Proceeding")
+                or content.startswith("✕ Cancelled")
+            ):
+                continue
+            # Keep only a preview of the proposed plan if it's too long
+            if content.startswith("**📋 Proposed Plan:**"):
+                content = content[:1000] + "\n\n... [Plan truncated for chat history brevity] ..."
+            chat_history.append({"role": msg["role"], "content": content})
+
+        # Only take the last 8 messages for context
+        chat_history = chat_history[-8:]
 
         # Scan the workspace for a file tree to give the agent context
         file_tree = []
@@ -413,7 +462,15 @@ Keep responses concise and useful. Use markdown formatting."""
         response = litellm.completion(model=model_str, messages=messages)
 
         reply = response.choices[0].message.content
-        return {"reply": reply}
+        usage = getattr(response, "usage", None)
+        usage_dict = {}
+        if usage:
+            usage_dict = {
+                "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                "completion_tokens": getattr(usage, "completion_tokens", 0),
+                "total_tokens": getattr(usage, "total_tokens", 0),
+            }
+        return {"reply": reply, "usage": usage_dict}
 
     except HTTPException:
         raise
@@ -812,8 +869,15 @@ async def generate_code_stream(req: DevelopRequest):
                 final_status = "partial"
             else:
                 final_status = "success"
+            metrics = {}
+            if 'crew' in locals() and hasattr(crew, "usage_metrics") and crew.usage_metrics:
+                metrics = {
+                    "prompt_tokens": crew.usage_metrics.get("prompt_tokens", 0),
+                    "completion_tokens": crew.usage_metrics.get("completion_tokens", 0),
+                    "total_tokens": crew.usage_metrics.get("total_tokens", 0),
+                }
             q.put(
-                f"event: done\ndata: {_json.dumps({'killed': killed, 'error': errored, 'status': final_status, 'status_summary': task_status.get('summary', '')})}\n\n"
+                f"event: done\ndata: {_json.dumps({'killed': killed, 'error': errored, 'status': final_status, 'status_summary': task_status.get('summary', ''), 'usage': metrics})}\n\n"
             )
 
     threading.Thread(target=run_crew).start()
@@ -1139,8 +1203,15 @@ async def dev_iterate(req: IterateRequest):
                 final_status = "partial"
             else:
                 final_status = "success"
+            metrics = {}
+            if 'crew' in locals() and hasattr(crew, "usage_metrics") and crew.usage_metrics:
+                metrics = {
+                    "prompt_tokens": crew.usage_metrics.get("prompt_tokens", 0),
+                    "completion_tokens": crew.usage_metrics.get("completion_tokens", 0),
+                    "total_tokens": crew.usage_metrics.get("total_tokens", 0),
+                }
             q.put(
-                f"event: done\ndata: {_json.dumps({'killed': killed, 'error': errored, 'status': final_status, 'status_summary': task_status.get('summary', '')})}\n\n"
+                f"event: done\ndata: {_json.dumps({'killed': killed, 'error': errored, 'status': final_status, 'status_summary': task_status.get('summary', ''), 'usage': metrics})}\n\n"
             )
 
     threading.Thread(target=run_iterate).start()

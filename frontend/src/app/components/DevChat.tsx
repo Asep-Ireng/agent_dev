@@ -1,7 +1,13 @@
-import React, { useRef, useEffect } from "react";
+import React, { useRef, useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Code2, Send, Paperclip, Loader2 } from "lucide-react";
+import { Code2, Send, Paperclip, Loader2, ChevronDown, ChevronRight, Eye } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import dynamic from "next/dynamic";
+
+const PatchDiff = dynamic(
+  () => import("@pierre/diffs/react").then((mod) => mod.PatchDiff),
+  { ssr: false }
+);
 
 interface DevChatProps {
   devChatMessages: { role: string; content: string }[];
@@ -21,6 +27,9 @@ interface DevChatProps {
   setDevChatMessages: React.Dispatch<
     React.SetStateAction<{ role: string; content: string }[]>
   >;
+  workspaceDiff: string;
+  fetchWorkspaceDiff: () => void;
+  totalTokens: { prompt: number; completion: number; total: number };
 }
 
 export default function DevChat({
@@ -39,12 +48,20 @@ export default function DevChat({
   handleDevChat,
   handleApplyProceed,
   setDevChatMessages,
+  workspaceDiff,
+  fetchWorkspaceDiff,
+  totalTokens,
 }: DevChatProps) {
   const devChatEndRef = useRef<HTMLDivElement>(null);
+  const [isDiffExpanded, setIsDiffExpanded] = useState(false);
 
   useEffect(() => {
     devChatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [devChatMessages]);
+
+  useEffect(() => {
+    fetchWorkspaceDiff();
+  }, []);
 
   if (!agentResult || developerLoading) return null;
 
@@ -60,7 +77,7 @@ export default function DevChat({
         <div className="flex justify-between items-end">
           <div className="flex flex-col">
             <span className="text-[9px] font-mono text-[#E51937] tracking-widest uppercase block mb-1">
-              SYS // COMPILER_TUNING
+              SYS // COMPILER_TUNING {totalTokens.total > 0 && `// TOKENS: ${totalTokens.total.toLocaleString()} (P: ${totalTokens.prompt.toLocaleString()} | C: ${totalTokens.completion.toLocaleString()})`}
             </span>
             <div className="flex items-center gap-3">
               <div className="w-8 h-8 rounded-full bg-[#E51937]/10 flex items-center justify-center border border-[#E51937]/20">
@@ -258,6 +275,53 @@ export default function DevChat({
             </div>
           </div>
         </div>
+
+        {workspaceDiff && (
+          <div className="bg-black/20 border border-white/10 rounded-2xl overflow-hidden flex flex-col mt-4">
+            <button
+              onClick={() => setIsDiffExpanded(!isDiffExpanded)}
+              className="w-full flex items-center justify-between px-4 py-3 bg-white/5 hover:bg-white/[0.08] transition-colors text-left cursor-pointer"
+            >
+              <div className="flex items-center gap-2">
+                <Eye className="w-4 h-4 text-[#E51937]" />
+                <span className="font-mono text-xs font-bold text-[#F4F4F6] uppercase tracking-wider">
+                  Code Diff Review
+                </span>
+                <span className="bg-[#E51937]/10 text-[#E51937] text-[10px] px-1.5 py-0.5 rounded font-mono border border-[#E51937]/20 font-semibold">
+                  unstaged modifications
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5 text-xs text-[#F4F4F6]/50">
+                {isDiffExpanded ? (
+                  <>
+                    <span>Hide Diff</span>
+                    <ChevronDown className="w-4 h-4" />
+                  </>
+                ) : (
+                  <>
+                    <span>Show Diff</span>
+                    <ChevronRight className="w-4 h-4" />
+                  </>
+                )}
+              </div>
+            </button>
+
+            <AnimatePresence>
+              {isDiffExpanded && (
+                <motion.div
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: "auto", opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  className="border-t border-white/5 overflow-hidden"
+                >
+                  <div className="p-4 bg-black/40 max-h-[400px] overflow-y-auto custom-scrollbar font-mono text-xs">
+                    <PatchDiff patch={workspaceDiff} />
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        )}
       </motion.div>
     </AnimatePresence>
   );

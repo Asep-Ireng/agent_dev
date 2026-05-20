@@ -50,6 +50,12 @@ export default function Home() {
   const [devChatFiles, setDevChatFiles] = useState<File[]>([]);
   const [devChatMode, setDevChatMode] = useState<"ask" | "apply">("ask");
   const [pendingApplyTask, setPendingApplyTask] = useState<string | null>(null);
+  const [workspaceDiff, setWorkspaceDiff] = useState<string>("");
+  const [totalTokens, setTotalTokens] = useState({
+    prompt: 0,
+    completion: 0,
+    total: 0,
+  });
 
   // Fetch settings from backend on mount
   useEffect(() => {
@@ -100,6 +106,14 @@ export default function Home() {
 
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "API failed");
+
+      if (data.usage) {
+        setTotalTokens((prev) => ({
+          prompt: prev.prompt + (data.usage.prompt_tokens || 0),
+          completion: prev.completion + (data.usage.completion_tokens || 0),
+          total: prev.total + (data.usage.total_tokens || 0),
+        }));
+      }
 
       setSpec(data.spec);
       setChatHistory((prev) => [
@@ -157,6 +171,13 @@ export default function Home() {
               handleSSEEvent(currentEvent, data);
 
               if (currentEvent === "done") {
+                if (data.usage) {
+                  setTotalTokens((prev) => ({
+                    prompt: prev.prompt + (data.usage.prompt_tokens || 0),
+                    completion: prev.completion + (data.usage.completion_tokens || 0),
+                    total: prev.total + (data.usage.total_tokens || 0),
+                  }));
+                }
                 const status =
                   data.status ||
                   (data.killed ? "killed" : data.error ? "failed" : "success");
@@ -196,6 +217,7 @@ export default function Home() {
                 }
                 setPendingCommand(null);
                 setDeveloperLoading(false);
+                fetchWorkspaceDiff();
                 return;
               }
             } catch (e) {
@@ -311,6 +333,20 @@ export default function Home() {
     }
   };
 
+  const fetchWorkspaceDiff = async () => {
+    try {
+      const res = await fetch(
+        `http://localhost:8000/api/workspace/diff?workspace_path=${encodeURIComponent(
+          workspacePath
+        )}`
+      );
+      const data = await res.json();
+      setWorkspaceDiff(data.diff || "");
+    } catch (err) {
+      console.error("Failed to fetch diff:", err);
+    }
+  };
+
   const handleDevChat = async () => {
     if (!devChatInput.trim() || devChatLoading) return;
 
@@ -352,6 +388,13 @@ export default function Home() {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
         const data = await response.json();
+        if (data.usage) {
+          setTotalTokens((prev) => ({
+            prompt: prev.prompt + (data.usage.prompt_tokens || 0),
+            completion: prev.completion + (data.usage.completion_tokens || 0),
+            total: prev.total + (data.usage.total_tokens || 0),
+          }));
+        }
         setPendingApplyTask(userMessage);
         setDevChatMessages((prev) => [
           ...prev,
@@ -390,6 +433,13 @@ export default function Home() {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
         const data = await response.json();
+        if (data.usage) {
+          setTotalTokens((prev) => ({
+            prompt: prev.prompt + (data.usage.prompt_tokens || 0),
+            completion: prev.completion + (data.usage.completion_tokens || 0),
+            total: prev.total + (data.usage.total_tokens || 0),
+          }));
+        }
         setDevChatMessages((prev) => [
           ...prev,
           { role: "assistant", content: data.reply },
@@ -423,8 +473,17 @@ export default function Home() {
     setActionLogs([]);
 
     const chatContext = devChatMessages
-      .slice(-10)
-      .map((m) => `${m.role === "user" ? "User" : "Dev"}: ${m.content}`)
+      .filter(
+        (m) =>
+          !m.content.startsWith("✅ **Changes Applied:**") &&
+          !m.content.startsWith("▶ Proceeding") &&
+          !m.content.startsWith("✕ Cancelled")
+      )
+      .slice(-6)
+      .map(
+        (m) =>
+          `${m.role === "user" ? "User" : "Dev"}: ${m.content.slice(0, 1500)}`
+      )
       .join("\n");
     const fullTask = chatContext
       ? `${taskToExecute}\n\n--- Chat Context ---\n${chatContext}`
@@ -516,7 +575,15 @@ export default function Home() {
                   }
                   break;
                 case "done":
+                  if (data.usage) {
+                    setTotalTokens((prev) => ({
+                      prompt: prev.prompt + (data.usage.prompt_tokens || 0),
+                      completion: prev.completion + (data.usage.completion_tokens || 0),
+                      total: prev.total + (data.usage.total_tokens || 0),
+                    }));
+                  }
                   setDeveloperLoading(false);
+                  fetchWorkspaceDiff();
                   return;
               }
             } catch (e) {
@@ -599,17 +666,47 @@ export default function Home() {
             initial={{ y: 20, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             transition={{ delay: 0.1 }}
-            className="space-y-1"
+            className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-white/5 pb-6"
           >
-            <span className="text-[11px] font-mono text-[#E51937] tracking-widest uppercase block mb-1">
-              ENGINEERING CONTROL DESK
-            </span>
-            <h2 className="text-3xl font-bold text-[#F4F4F6] tracking-tight">
-              What are we building?
-            </h2>
-            <p className="text-[#F4F4F6]/60 text-xs font-mono">
-              [SYS] Enter a high level idea and watch the agents build the software.
-            </p>
+            <div className="space-y-1">
+              <span className="text-[11px] font-mono text-[#E51937] tracking-widest uppercase block mb-1">
+                ENGINEERING CONTROL DESK
+              </span>
+              <h2 className="text-3xl font-bold text-[#F4F4F6] tracking-tight">
+                What are we building?
+              </h2>
+              <p className="text-[#F4F4F6]/60 text-xs font-mono">
+                [SYS] Enter a high level idea and watch the agents build the software.
+              </p>
+            </div>
+
+            {totalTokens.total > 0 && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="bg-black/35 border border-white/10 rounded-xl p-3 flex items-center gap-4 font-mono text-xs backdrop-blur-sm shadow-lg shadow-black/20"
+              >
+                <div className="flex flex-col">
+                  <span className="text-[9px] text-[#E51937]/70 uppercase tracking-wider font-semibold">Live Telemetry // Token Usage</span>
+                  <div className="flex items-center gap-4 mt-1.5 text-[#F4F4F6]">
+                    <div>
+                      <span className="text-[#F4F4F6]/40 text-[9px]">PROMPT:</span>{" "}
+                      <span className="font-bold text-[#6B9FC4]">{totalTokens.prompt.toLocaleString()}</span>
+                    </div>
+                    <div className="border-l border-white/10 h-4" />
+                    <div>
+                      <span className="text-[#F4F4F6]/40 text-[9px]">COMPLETION:</span>{" "}
+                      <span className="font-bold text-[#E51937]">{totalTokens.completion.toLocaleString()}</span>
+                    </div>
+                    <div className="border-l border-white/10 h-4" />
+                    <div className="bg-[#E51937]/10 px-2 py-0.5 rounded border border-[#E51937]/20">
+                      <span className="text-[#E51937]/80 text-[9px] font-bold">TOTAL:</span>{" "}
+                      <span className="font-extrabold text-[#E51937]">{totalTokens.total.toLocaleString()}</span>
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            )}
           </motion.div>
 
           {/* MAIN INTERFACE: Split view for Chat & Spec */}
@@ -669,6 +766,9 @@ export default function Home() {
             handleDevChat={handleDevChat}
             handleApplyProceed={handleApplyProceed}
             setDevChatMessages={setDevChatMessages}
+            workspaceDiff={workspaceDiff}
+            fetchWorkspaceDiff={fetchWorkspaceDiff}
+            totalTokens={totalTokens}
           />
         </div>
       </main>
