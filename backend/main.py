@@ -13,6 +13,7 @@ import traceback
 import yaml
 from PyPDF2 import PdfReader
 from crewai import Agent, Task, Crew, LLM
+from langchain_core.callbacks import BaseCallbackHandler
 from fastapi.responses import StreamingResponse
 from dev_tools import (
     TerminalExecutionTool,
@@ -635,6 +636,15 @@ async def generate_code_stream(req: DevelopRequest):
         def flush(self):
             pass
 
+    class CustomStreamCallback(BaseCallbackHandler):
+        """Streams LLM tokens directly to the frontend to show live typing/thinking."""
+        def __init__(self, q: queue.Queue):
+            self.q = q
+            
+        def on_llm_new_token(self, token: str, **kwargs) -> None:
+            if token:
+                _emit(self.q, "model_thinking", {"text": token})
+
     def run_crew():
         killed = False
         errored = False
@@ -745,6 +755,7 @@ async def generate_code_stream(req: DevelopRequest):
 
             my_llm = LLM(
                 model=get_llm(model, provider),
+                callbacks=[CustomStreamCallback(q)],
                 **llm_kwargs
             )
 
@@ -1067,6 +1078,7 @@ async def dev_iterate(req: IterateRequest):
 
             my_llm = LLM(
                 model=get_llm(model, provider),
+                callbacks=[CustomStreamCallback(q)],
                 **llm_kwargs
             )
 

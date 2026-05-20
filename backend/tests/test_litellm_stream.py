@@ -3,15 +3,20 @@ import sys
 import json
 from dotenv import load_dotenv
 
-load_dotenv("../.env")
+load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
 
 import litellm
 
 litellm.set_verbose = False
 
 try:
+    model_name = os.getenv("GOOGLE_MODEL", "gemini-3-flash-preview")
+    if not model_name.startswith("gemini/"):
+        model_name = f"gemini/{model_name}"
+
     response = litellm.completion(
-        model="gemini/gemini-2.5-pro", # Using this as standard to test Litellm's reasoning structure
+        api_key=os.getenv("GOOGLE_API_KEY"),
+        model=model_name,
         messages=[{"role": "user", "content": "What is 25 * 48? Explain step by step."}],
         stream=True,
         reasoning_effort="high"

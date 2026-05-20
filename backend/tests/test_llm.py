@@ -4,12 +4,16 @@ import sys
 import json
 
 from dotenv import load_dotenv
-load_dotenv("../.env")
+load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
 
 try:
+    model_name = os.getenv("GOOGLE_MODEL", "gemini-3-flash-preview")
+    if not model_name.startswith("gemini/"):
+        model_name = f"gemini/{model_name}"
+
     response = litellm.completion(
         api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"),
-        model="gemini/gemini-2.5-pro",
+        model=model_name,
         messages=[{"role": "user", "content": "Solve: 25 * 48. Think step by step."}],
         stream=True,
         reasoning_effort="high"

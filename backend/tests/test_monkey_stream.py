@@ -2,7 +2,7 @@ import os
 import sys
 from dotenv import load_dotenv
 
-load_dotenv("../.env")
+load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
 
 import litellm
 import json
@@ -55,13 +55,18 @@ def custom_patched_completion(*args, **kwargs):
     )
     
     return sync_resp
-
+ 
 litellm.completion = custom_patched_completion
-
+ 
 try:
+    model_name = os.getenv("GOOGLE_MODEL", "gemini-3-flash-preview")
+    if not model_name.startswith("gemini/"):
+        model_name = f"gemini/{model_name}"
+
     llm = LLM(
-        model="gemini/gemini-2.5-pro",
-        reasoning_effort="high"
+        model=model_name,
+        reasoning_effort="high",
+        api_key=os.getenv("GOOGLE_API_KEY"),
     )
     agent = Agent(
         role="Mathematician",

@@ -2,7 +2,7 @@ import os
 import sys
 from dotenv import load_dotenv
 
-load_dotenv("../.env")
+load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
 
 import litellm
 from crewai import Agent, Task, Crew, LLM
@@ -40,9 +40,14 @@ class Catch:
 sys.stdout = Catch()
 
 try:
+    model_name = os.getenv("GOOGLE_MODEL", "gemini-3-flash-preview")
+    if not model_name.startswith("gemini/"):
+        model_name = f"gemini/{model_name}"
+
     llm = LLM(
-        model="gemini/gemini-2.5-pro",
-        reasoning_effort="high"
+        model=model_name,
+        reasoning_effort="high",
+        api_key=os.getenv("GOOGLE_API_KEY"),
     )
     agent = Agent(
         role="Mathematician",
