@@ -19,7 +19,7 @@ try:
         model=model_name,
         messages=[{"role": "user", "content": "What is 25 * 48? Explain step by step."}],
         stream=True,
-        reasoning_effort="high"
+        reasoning_effort="low"
     )
     for i, chunk in enumerate(response):
         c_dict = chunk.model_dump()

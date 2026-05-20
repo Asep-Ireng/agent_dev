@@ -440,6 +440,16 @@ def _emit(q: queue.Queue, event_type: str, payload: dict):
     q.put(f"event: {event_type}\ndata: {_json.dumps(payload)}\n\n")
 
 
+class CustomStreamCallback(BaseCallbackHandler):
+    """Streams LLM tokens directly to the frontend to show live typing/thinking."""
+    def __init__(self, q: queue.Queue):
+        self.q = q
+        
+    def on_llm_new_token(self, token: str, **kwargs) -> None:
+        if token:
+            _emit(self.q, "model_thinking", {"text": token})
+
+
 @app.post("/api/develop")
 async def generate_code_stream(req: DevelopRequest):
     set_keys_from_env()
@@ -635,15 +645,6 @@ async def generate_code_stream(req: DevelopRequest):
 
         def flush(self):
             pass
-
-    class CustomStreamCallback(BaseCallbackHandler):
-        """Streams LLM tokens directly to the frontend to show live typing/thinking."""
-        def __init__(self, q: queue.Queue):
-            self.q = q
-            
-        def on_llm_new_token(self, token: str, **kwargs) -> None:
-            if token:
-                _emit(self.q, "model_thinking", {"text": token})
 
     def run_crew():
         killed = False

@@ -572,7 +572,7 @@ export default function Home() {
   };
 
   return (
-    <div className="flex h-screen bg-[#25343F] text-[#EAEFEF]/80 font-sans selection:bg-[#FF9B51]/30 overflow-hidden">
+    <div className="flex h-screen bg-[#0F0F11] text-[#F4F4F6]/80 font-sans selection:bg-[#E51937]/30 overflow-hidden">
       <Sidebar
         provider={provider}
         setProvider={setProvider}
@@ -592,20 +592,23 @@ export default function Home() {
         updateBackendSettings={updateBackendSettings}
       />
 
-      <main className="flex-1 overflow-y-auto p-10 relative">
+      <main className="flex-1 overflow-y-auto p-10 relative bg-grid">
         <div className="max-w-4xl mx-auto space-y-12 pb-32">
           {/* HEADER AREA */}
           <motion.div
             initial={{ y: 20, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             transition={{ delay: 0.1 }}
-            className="space-y-2"
+            className="space-y-1"
           >
-            <h2 className="text-3xl font-light text-[#EAEFEF] tracking-tight">
+            <span className="text-[11px] font-mono text-[#E51937] tracking-widest uppercase block mb-1">
+              ENGINEERING CONTROL DESK
+            </span>
+            <h2 className="text-3xl font-bold text-[#F4F4F6] tracking-tight">
               What are we building?
             </h2>
-            <p className="text-[#EAEFEF]/60 text-sm">
-              Enter a high level idea and watch the agents build the software.
+            <p className="text-[#F4F4F6]/60 text-xs font-mono">
+              [SYS] Enter a high level idea and watch the agents build the software.
             </p>
           </motion.div>
 
@@ -672,7 +675,7 @@ export default function Home() {
 
       <button
         onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
-        className="fixed bottom-6 right-6 z-50 w-10 h-10 bg-[#395370]/80 hover:bg-[#395370] text-[#EAEFEF] rounded-full shadow-lg shadow-black/30 flex items-center justify-center transition-all hover:scale-110 active:scale-95 backdrop-blur-sm border border-white/10"
+        className="fixed bottom-6 right-6 z-50 w-10 h-10 bg-[#27272a]/80 hover:bg-[#27272a] text-[#F4F4F6] rounded-full shadow-lg shadow-black/30 flex items-center justify-center transition-all hover:scale-110 active:scale-95 backdrop-blur-sm border border-white/10"
         title="Scroll to top"
       >
         <ChevronUp className="w-5 h-5" />

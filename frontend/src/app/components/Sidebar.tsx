@@ -44,13 +44,13 @@ export default function Sidebar({
       initial={{ x: -300, opacity: 0 }}
       animate={{ x: 0, opacity: 1 }}
       transition={{ duration: 0.5, ease: "easeOut" }}
-      className="w-80 bg-black/20 backdrop-blur-md border-r border-[#EAEFEF]/5 p-6 flex flex-col shadow-2xl z-10"
+      className="w-80 bg-black/20 backdrop-blur-md border-r border-[#F4F4F6]/5 p-6 flex flex-col shadow-2xl z-10"
     >
       <div className="flex items-center gap-3 mb-10">
-        <div className="p-2 bg-gradient-to-br from-[#FF9B51] to-[#FF9B51] rounded-xl shadow-lg shadow-[#FF9B51]/30">
-          <Sparkles className="w-5 h-5 text-[#EAEFEF]" />
+        <div className="p-2 bg-gradient-to-br from-[#E51937] to-[#E51937] rounded-xl shadow-lg shadow-[#E51937]/30">
+          <Sparkles className="w-5 h-5 text-[#F4F4F6]" />
         </div>
-        <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-[#EAEFEF] to-[#BFC9D1]">
+        <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-[#F4F4F6] to-[#71717A]">
           Agentic Dev Studio
         </h1>
       </div>
@@ -72,8 +72,8 @@ export default function Sidebar({
                 className={`px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 border 
                   ${
                     provider === p
-                      ? "bg-[#FF9B51]/30 border-[#FF9B51]/50 text-[#EAEFEF] shadow-inner"
-                      : "bg-black/20 border-[#EAEFEF]/5 hover:bg-[#EAEFEF]/5 text-[#EAEFEF]/60"
+                      ? "bg-[#E51937]/30 border-[#E51937]/50 text-[#F4F4F6] shadow-inner"
+                      : "bg-black/20 border-[#F4F4F6]/5 hover:bg-[#F4F4F6]/5 text-[#F4F4F6]/60"
                   }`}
               >
                 {p.split(" ")[0]}
@@ -95,7 +95,7 @@ export default function Sidebar({
               else setGoogleModel(e.target.value);
               updateBackendSettings(undefined, e.target.value);
             }}
-            className="w-full bg-black/20 border border-[#EAEFEF]/5 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#FF9B51]/50 transition-all placeholder:text-[#EAEFEF]/40"
+            className="w-full bg-black/20 border border-[#F4F4F6]/5 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#E51937]/50 transition-all placeholder:text-[#F4F4F6]/40"
           />
         </div>
 
@@ -110,7 +110,7 @@ export default function Sidebar({
                 setThinkingLevel(e.target.value);
                 updateBackendSettings(undefined, undefined, e.target.value);
               }}
-              className="w-full bg-black/20 border border-[#EAEFEF]/5 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#FF9B51]/50 transition-all text-[#EAEFEF]"
+              className="w-full bg-black/20 border border-[#F4F4F6]/5 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#E51937]/50 transition-all text-[#F4F4F6]"
             >
               <option value="none" className="bg-[#0A0A0B]">None (Default)</option>
               <option value="minimal" className="bg-[#0A0A0B]">Minimal</option>
@@ -130,14 +130,14 @@ export default function Sidebar({
             placeholder="./workspace"
             value={workspacePath}
             onChange={(e) => setWorkspacePath(e.target.value)}
-            className="w-full bg-black/20 border border-[#EAEFEF]/5 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#FF9B51]/50 transition-all font-mono placeholder:text-[#EAEFEF]/40"
+            className="w-full bg-black/20 border border-[#F4F4F6]/5 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#E51937]/50 transition-all font-mono placeholder:text-[#F4F4F6]/40"
           />
-          <p className="text-[10px] text-[#BFC9D1]/50 mt-1">
+          <p className="text-[10px] text-[#71717A]/50 mt-1">
             Directory where the agent writes code.
           </p>
         </div>
 
-        <div className="space-y-2 pt-2 border-t border-[#EAEFEF]/5">
+        <div className="space-y-2 pt-2 border-t border-[#F4F4F6]/5">
           <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center justify-between">
             <span>HITL Verification</span>
             <button
@@ -152,7 +152,7 @@ export default function Sidebar({
                 }
               }}
               className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full transition-colors duration-200 ease-in-out ${
-                requireApproval ? "bg-[#FF9B51]" : "bg-[#EAEFEF]/20"
+                requireApproval ? "bg-[#E51937]" : "bg-[#F4F4F6]/20"
               }`}
             >
               <span
@@ -162,7 +162,7 @@ export default function Sidebar({
               />
             </button>
           </label>
-          <p className="text-[10px] text-[#EAEFEF]/40 mt-1">
+          <p className="text-[10px] text-[#F4F4F6]/40 mt-1">
             Require explicit approval before executing any Terminal commands.
           </p>
         </div>
