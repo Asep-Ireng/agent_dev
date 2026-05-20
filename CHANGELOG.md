@@ -82,20 +82,20 @@ graph TD
 
 ---
 
-### 2. The Problem: Quadratic Context Explosion
-Previously, when you chatted in the developer drawer, the application sent the *entire* history of `devChatMessages` raw to the LLM on every single interaction:
-1. **Apply Plan Executions**: When the builder agent completed an apply task, it appended a message containing the **full raw terminal execution log** (which could easily exceed `50,000` characters of compiler output, lints, and test traces):
+### 2. The Problem: Quadratic Context Explosion on the Development Agent
+The catastrophic 1.8M input token blowup did **not** occur on the single conversational Dev Chat endpoint, but rather directly within the **background Developer Agent** (`/api/dev-iterate` and `/api/develop` CrewAI agentic loop):
+1. **The CrewAI Multi-Step Loop**: Unlike standard chat models that run a single prompt-response cycle, the background Developer Agent runs an active agentic loop executing up to 75 steps (reasoning, calling terminal tools, editing files, self-healing compiler errors).
+2. **Recursive Task Injection**: CrewAI sends the *entire task description* (the `fullTask` parameter containing the conversation context) to the LLM on **every single tool execution step** of the loop.
+3. **The Bloat Vector**: Previously, when the builder completed an iteration, it appended the **full raw terminal execution log** (which could easily exceed `50,000` characters of compiler output, lints, and test traces) directly to the `devChatMessages` history:
    ```markdown
    ✅ **Changes Applied:**
    [50k+ characters of raw stdout/stderr]
    ```
-2. **Infinite Accumulation**: Every follow-up question or tweak request carried all previous execution outputs, file contents, and multi-file plans.
-3. **Prompt Blowup**:
-   * **Turn 1**: User asks a question (`500` tokens) + System Prompt
-   * **Turn 2**: Turn 1 + Chat Response + System Prompt + Follow-up (~`5,000` tokens)
-   * **Turn 3**: Turn 1 + Turn 2 (with a massive `50K` char compilation log) + Follow-up (~`40,000` tokens)
-   * **Turn 4**: Turn 1 + Turn 2 + Turn 3 (with another `50K` char compilation log) + Follow-up (~`85,000` tokens)
-   * *Result*: A simple debugging session quickly compounded quadratically, reaching **1.8 Million input tokens** and exhausting your API quota.
+4. **Context Compounding**: On the next iteration, the frontend compiled this raw history into the new task description. When you clicked **Proceed**, the background Developer Agent received a multi-file plan prepended with the massive terminal outputs.
+5. **The Explosion**:
+   * If the task description has `80,000` tokens of chat context/logs, and the agent takes `20` steps to execute, verify, and fix the code:
+   * **Total Input Cost**: $80,000 \text{ tokens} \times 20 \text{ steps} = 1,600,000 \text{ input tokens}$ for a single run!
+   * *Result*: A single developer session compounded catastrophically, instantly burning **1.8 Million input tokens** and exhausting your API quota.
 
 ---
 

@@ -310,9 +310,9 @@ async def generate_design_chat(
         metrics = {}
         if hasattr(crew, "usage_metrics") and crew.usage_metrics:
             metrics = {
-                "prompt_tokens": crew.usage_metrics.get("prompt_tokens", 0),
-                "completion_tokens": crew.usage_metrics.get("completion_tokens", 0),
-                "total_tokens": crew.usage_metrics.get("total_tokens", 0),
+                "prompt_tokens": getattr(crew.usage_metrics, "prompt_tokens", 0),
+                "completion_tokens": getattr(crew.usage_metrics, "completion_tokens", 0),
+                "total_tokens": getattr(crew.usage_metrics, "total_tokens", 0),
             }
 
         # Read from shared dict if tool was called, fall back to raw output

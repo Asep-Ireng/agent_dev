@@ -189,17 +189,19 @@ class TerminalExecutionTool(BaseTool):
                     "cmd_end", {"exit_code": returncode, "success": returncode == 0}
                 )
 
-            # Truncate output to avoid wasting tokens on massive listings
+            # Truncate output to avoid wasting tokens on massive listings.
+            # stdout: keep the HEAD (first N chars) — useful for scaffolding/install logs.
+            # stderr: keep the TAIL (last N chars) — errors appear at the end, not the start.
             MAX_OUTPUT = 5000
             if len(stdout_text) > MAX_OUTPUT:
                 stdout_text = (
                     stdout_text[:MAX_OUTPUT]
-                    + f"\n\n... [OUTPUT TRUNCATED — {len(''.join(stdout_lines))} chars total, showing first {MAX_OUTPUT}. Avoid recursive listings like 'dir /s' or 'tree'.]"
+                    + f"\n\n... [STDOUT TRUNCATED — {len(''.join(stdout_lines))} chars total, showing first {MAX_OUTPUT}. Avoid recursive listings like 'dir /s' or 'tree'.]\n"
                 )
             if len(stderr_text) > MAX_OUTPUT:
                 stderr_text = (
-                    stderr_text[:MAX_OUTPUT]
-                    + f"\n\n... [STDERR TRUNCATED — {len(''.join(stderr_lines))} chars total.]"
+                    f"... [STDERR TRUNCATED — {len(''.join(stderr_lines))} chars total, showing last {MAX_OUTPUT}] ...\n\n"
+                    + stderr_text[-MAX_OUTPUT:]
                 )
 
             output = f"[CWD] {cwd}\n"
