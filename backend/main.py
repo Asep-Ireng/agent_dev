@@ -33,6 +33,8 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 app = FastAPI(title="AI Agent Developer Backend")
 
 # Global event to signal the background Agent thread to abort execution
+# TODO: abort_event and approval_state are process-global — concurrent requests
+# will interfere. Implement per-request run_id keying if deploying multi-user.
 abort_event = threading.Event()
 
 # State for HITL execution approvals
@@ -498,13 +500,292 @@ def _emit(q: queue.Queue, event_type: str, payload: dict):
 
 
 class CustomStreamCallback(BaseCallbackHandler):
-    """Streams LLM tokens directly to the frontend to show live typing/thinking."""
+    """Callback handler that forwards LLM reasoning/thinking tokens to the SSE queue.
+    
+    Only emits reasoning_content chunks (extended thinking) — not regular output tokens.
+    Regular token streaming is handled by PatchedStream intercepting litellm's response.
+    """
     def __init__(self, q: queue.Queue):
         self.q = q
-        
-    def on_llm_new_token(self, token: str, **kwargs) -> None:
-        if token:
-            _emit(self.q, "model_thinking", {"text": token})
+
+    def on_llm_end(self, response, **kwargs) -> None:
+        """No-op — token forwarding is done by PatchedStream."""
+        pass
+
+
+import litellm as _litellm
+
+_thread_local = threading.local()
+_old_completion = _litellm.completion
+
+class PatchedStream:
+    def __init__(self, response):
+        self.response = response
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            chunk = next(self.response)
+        except StopIteration:
+            raise StopIteration
+
+        try:
+            delta = chunk.choices[0].delta
+            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                if hasattr(_thread_local, "queue") and _thread_local.queue:
+                    _emit(_thread_local.queue, "model_thinking", {"text": delta.reasoning_content})
+        except Exception:
+            pass
+
+        return chunk
+
+    def __getattr__(self, name):
+        return getattr(self.response, name)
+
+
+def _patched_completion(*args, **kwargs):
+    response = _old_completion(*args, **kwargs)
+    if kwargs.get("stream"):
+        return PatchedStream(response)
+    # Non-streaming: extract reasoning_content (Gemini extended thinking)
+    try:
+        if hasattr(_thread_local, "queue") and _thread_local.queue:
+            msg = response.choices[0].message
+            reasoning = getattr(msg, "reasoning_content", None)
+            if reasoning:
+                _emit(_thread_local.queue, "model_thinking", {"text": reasoning})
+    except Exception:
+        pass
+    return response
+
+_litellm.completion = _patched_completion
+
+
+class StreamCatcher:
+    """Captures CrewAI stdout, parses ReAct patterns, and emits typed SSE events.
+
+    Designed to be assigned to sys.stdout inside a background thread so that
+    all CrewAI print output is intercepted, parsed, and forwarded as structured
+    SSE events via the provided queue.
+    """
+
+    def __init__(self, q: queue.Queue):
+        self.q = q
+        self.buffer = ""
+        self.in_thinking = False
+
+    def write(self, text):
+        if not text or not text.strip():
+            return
+
+        clean = _strip_ansi(text)
+        if not clean:
+            return
+
+        if "<think>" in clean:
+            self.in_thinking = True
+            clean = clean.replace("<think>", "").strip()
+            if not clean:
+                return
+
+        if "</think>" in clean:
+            self.in_thinking = False
+            clean = clean.replace("</think>", "").strip()
+            if clean:
+                _emit(self.q, "model_thinking", {"text": clean})
+            return
+
+        if self.in_thinking:
+            _emit(self.q, "model_thinking", {"text": clean})
+            return
+
+        # --- Detect CrewAI ReAct patterns ---
+
+        # Agent start / delegation header
+        if clean.startswith("Agent:") or clean.startswith("## Agent:"):
+            _emit(self.q, "system", {"text": clean, "level": "info"})
+            return
+
+        # Task header
+        if clean.startswith("Task:") or clean.startswith("## Task:"):
+            _emit(self.q, "system", {"text": clean, "level": "info"})
+            return
+
+        # Agent thinking / reasoning
+        if clean.startswith("Thought:") or clean.startswith("> Thinking:"):
+            thought_text = clean.split(":", 1)[1].strip() if ":" in clean else clean
+            _emit(self.q, "thought", {"text": thought_text})
+            return
+
+        # Tool call detection
+        if clean.startswith("Action:"):
+            tool_name = clean.split(":", 1)[1].strip() if ":" in clean else clean
+            _emit(self.q, "tool_call", {"tool": tool_name, "input": ""})
+            return
+
+        if clean.startswith("Action Input:"):
+            action_input = clean.split(":", 1)[1].strip() if ":" in clean else clean
+            _emit(self.q, "tool_input", {"input": action_input})
+            return
+
+        # Tool result / observation — parse structured markers from our tools
+        if (
+            clean.startswith("Observation:")
+            or ("Tool" in clean and "executed with result" in clean)
+        ):
+            self._emit_tool_result(clean)
+            return
+
+        # Final answer
+        if clean.startswith("Final Answer:"):
+            answer_text = clean.split(":", 1)[1].strip() if ":" in clean else clean
+            _emit(self.q, "final_answer", {"text": answer_text})
+            return
+
+        # System messages from our own code
+        if clean.startswith("[SYSTEM]"):
+            level = "info"
+            if "[WARN]" in clean:
+                level = "warn"
+            elif "[ERROR]" in clean:
+                level = "error"
+            _emit(self.q, "system", {"text": clean, "level": level})
+            return
+
+        # Everything else — send as raw log
+        _emit(self.q, "log", {"text": clean})
+
+    def _emit_tool_result(self, text):
+        """Parse tool result text and emit structured tool_result event."""
+        result_text = text
+        if ":" in text:
+            result_text = text.split(":", 1)[1].strip()
+
+        # Extract structured markers from our TerminalExecutionTool output
+        cwd = ""
+        cmd = ""
+        stdout = ""
+        stderr = ""
+        exit_code = None
+        success = True
+
+        if "[CWD]" in result_text:
+            parts = result_text
+            cwd_match = _re.search(r"\[CWD\]\s*(.+?)(?:\n|\[CMD\]|$)", parts)
+            cmd_match = _re.search(
+                r"\[CMD\]\s*(.+?)(?:\n|\[STDOUT\]|\[STDERR\]|\[EXIT\]|$)", parts
+            )
+            stdout_match = _re.search(
+                r"\[STDOUT\]\s*\n?(.*?)(?:\[STDERR\]|\[EXIT\]|$)", parts, _re.DOTALL
+            )
+            stderr_match = _re.search(
+                r"\[STDERR\]\s*\n?(.*?)(?:\[EXIT\]|$)", parts, _re.DOTALL
+            )
+            exit_match = _re.search(r"\[EXIT\]\s*(\d+)", parts)
+
+            if cwd_match:
+                cwd = cwd_match.group(1).strip()
+            if cmd_match:
+                cmd = cmd_match.group(1).strip()
+            if stdout_match:
+                stdout = stdout_match.group(1).strip()
+            if stderr_match:
+                stderr = stderr_match.group(1).strip()
+            if exit_match:
+                exit_code = int(exit_match.group(1))
+
+            success = "[SUCCESS]" in result_text or exit_code == 0
+
+            _emit(
+                self.q,
+                "tool_result",
+                {
+                    "tool": "terminal",
+                    "cwd": cwd,
+                    "cmd": cmd,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "exit_code": exit_code,
+                    "success": success,
+                    "raw": "",
+                },
+            )
+        elif "WRITE_FILE" in result_text or "File written" in result_text:
+            success = "[SUCCESS]" in result_text
+            _emit(
+                self.q,
+                "tool_result",
+                {
+                    "tool": "write_file",
+                    "cwd": "",
+                    "cmd": "",
+                    "stdout": result_text,
+                    "stderr": "",
+                    "exit_code": 0 if success else 1,
+                    "success": success,
+                    "raw": "",
+                },
+            )
+        else:
+            # Generic tool result
+            success = "[FAILED]" not in result_text and "Error" not in result_text
+            _emit(
+                self.q,
+                "tool_result",
+                {
+                    "tool": "unknown",
+                    "cwd": "",
+                    "cmd": "",
+                    "stdout": result_text,
+                    "stderr": "",
+                    "exit_code": 0 if success else 1,
+                    "success": success,
+                    "raw": result_text,
+                },
+            )
+
+    def flush(self):
+        pass
+
+
+def create_dev_tools(workspace_path, require_approval, approval_callback, stream_callback, task_status):
+    """Factory to create the standard set of developer tools.
+
+    Used by both /api/develop and /api/dev-iterate to avoid duplicating
+    the tool instantiation block.
+    """
+    return [
+        TerminalExecutionTool(
+            workspace_path=workspace_path,
+            require_approval=require_approval,
+            approval_callback=approval_callback,
+            stream_callback=stream_callback,
+        ),
+        WriteFileTool(
+            workspace_path=workspace_path,
+            require_approval=require_approval,
+            approval_callback=approval_callback,
+        ),
+        ReadFileTool(workspace_path=workspace_path),
+        ReplaceInFileTool(
+            workspace_path=workspace_path,
+            require_approval=require_approval,
+            approval_callback=approval_callback,
+        ),
+        EditFileLinesTool(
+            workspace_path=workspace_path,
+            require_approval=require_approval,
+            approval_callback=approval_callback,
+        ),
+        InsertAtLineTool(
+            workspace_path=workspace_path,
+            require_approval=require_approval,
+            approval_callback=approval_callback,
+        ),
+        ReportTaskStatusTool(result_holder=task_status),
+    ]
 
 
 @app.post("/api/develop")
@@ -522,194 +803,16 @@ async def generate_code_stream(req: DevelopRequest):
 
     q = queue.Queue()
 
-    class StreamCatcher:
-        """Captures CrewAI stdout, parses ReAct patterns, and emits typed SSE events."""
-
-        def __init__(self):
-            self.buffer = ""
-            self.in_thinking = False
-
-        def write(self, text):
-            if not text or not text.strip():
-                return
-
-            clean = _strip_ansi(text)
-            if not clean:
-                return
-
-            if "<think>" in clean:
-                self.in_thinking = True
-                clean = clean.replace("<think>", "").strip()
-                if not clean:
-                    return
-            
-            if "</think>" in clean:
-                self.in_thinking = False
-                clean = clean.replace("</think>", "").strip()
-                if clean:
-                    _emit(q, "model_thinking", {"text": clean})
-                return
-
-            if self.in_thinking:
-                _emit(q, "model_thinking", {"text": clean})
-                return
-
-            # --- Detect CrewAI ReAct patterns ---
-
-            # Agent start / delegation header
-            if clean.startswith("Agent:") or clean.startswith("## Agent:"):
-                _emit(q, "system", {"text": clean, "level": "info"})
-                return
-
-            # Task header
-            if clean.startswith("Task:") or clean.startswith("## Task:"):
-                _emit(q, "system", {"text": clean, "level": "info"})
-                return
-
-            # Agent thinking / reasoning
-            if clean.startswith("Thought:") or clean.startswith("> Thinking:"):
-                thought_text = clean.split(":", 1)[1].strip() if ":" in clean else clean
-                _emit(q, "thought", {"text": thought_text})
-                return
-
-            # Tool call detection
-            if clean.startswith("Action:"):
-                tool_name = clean.split(":", 1)[1].strip() if ":" in clean else clean
-                _emit(q, "tool_call", {"tool": tool_name, "input": ""})
-                return
-
-            if clean.startswith("Action Input:"):
-                action_input = clean.split(":", 1)[1].strip() if ":" in clean else clean
-                _emit(q, "tool_input", {"input": action_input})
-                return
-
-            # Tool result / observation — parse structured markers from our tools
-            if (
-                clean.startswith("Observation:")
-                or "Tool" in clean
-                and "executed with result" in clean
-            ):
-                self._emit_tool_result(clean)
-                return
-
-            # Final answer
-            if clean.startswith("Final Answer:"):
-                answer_text = clean.split(":", 1)[1].strip() if ":" in clean else clean
-                _emit(q, "final_answer", {"text": answer_text})
-                return
-
-            # System messages from our own code
-            if clean.startswith("[SYSTEM]"):
-                level = "info"
-                if "[WARN]" in clean:
-                    level = "warn"
-                elif "[ERROR]" in clean:
-                    level = "error"
-                _emit(q, "system", {"text": clean, "level": level})
-                return
-
-            # Everything else — send as raw log
-            _emit(q, "log", {"text": clean})
-
-        def _emit_tool_result(self, text):
-            """Parse tool result text and emit structured tool_result event."""
-            result_text = text
-            if ":" in text:
-                result_text = text.split(":", 1)[1].strip()
-
-            # Extract structured markers from our TerminalExecutionTool output
-            cwd = ""
-            cmd = ""
-            stdout = ""
-            stderr = ""
-            exit_code = None
-            success = True
-
-            if "[CWD]" in result_text:
-                parts = result_text
-                cwd_match = _re.search(r"\[CWD\]\s*(.+?)(?:\n|\[CMD\]|$)", parts)
-                cmd_match = _re.search(
-                    r"\[CMD\]\s*(.+?)(?:\n|\[STDOUT\]|\[STDERR\]|\[EXIT\]|$)", parts
-                )
-                stdout_match = _re.search(
-                    r"\[STDOUT\]\s*\n?(.*?)(?:\[STDERR\]|\[EXIT\]|$)", parts, _re.DOTALL
-                )
-                stderr_match = _re.search(
-                    r"\[STDERR\]\s*\n?(.*?)(?:\[EXIT\]|$)", parts, _re.DOTALL
-                )
-                exit_match = _re.search(r"\[EXIT\]\s*(\d+)", parts)
-
-                if cwd_match:
-                    cwd = cwd_match.group(1).strip()
-                if cmd_match:
-                    cmd = cmd_match.group(1).strip()
-                if stdout_match:
-                    stdout = stdout_match.group(1).strip()
-                if stderr_match:
-                    stderr = stderr_match.group(1).strip()
-                if exit_match:
-                    exit_code = int(exit_match.group(1))
-
-                success = "[SUCCESS]" in result_text or exit_code == 0
-
-                _emit(
-                    q,
-                    "tool_result",
-                    {
-                        "tool": "terminal",
-                        "cwd": cwd,
-                        "cmd": cmd,
-                        "stdout": stdout,
-                        "stderr": stderr,
-                        "exit_code": exit_code,
-                        "success": success,
-                        "raw": "",
-                    },
-                )
-            elif "WRITE_FILE" in result_text or "File written" in result_text:
-                success = "[SUCCESS]" in result_text
-                _emit(
-                    q,
-                    "tool_result",
-                    {
-                        "tool": "write_file",
-                        "cwd": "",
-                        "cmd": "",
-                        "stdout": result_text,
-                        "stderr": "",
-                        "exit_code": 0 if success else 1,
-                        "success": success,
-                        "raw": "",
-                    },
-                )
-            else:
-                # Generic tool result
-                success = "[FAILED]" not in result_text and "Error" not in result_text
-                _emit(
-                    q,
-                    "tool_result",
-                    {
-                        "tool": "unknown",
-                        "cwd": "",
-                        "cmd": "",
-                        "stdout": result_text,
-                        "stderr": "",
-                        "exit_code": 0 if success else 1,
-                        "success": success,
-                        "raw": result_text,
-                    },
-                )
-
-        def flush(self):
-            pass
-
     def run_crew():
+        _thread_local.queue = q
         killed = False
         errored = False
         task_status = {}  # Shared dict for ReportTaskStatusTool
         error_count = [0]  # Mutable counter for step callback tracking
         old_stdout = sys.stdout
-        sys.stdout = StreamCatcher()
+        # TODO: sys.stdout is process-global — concurrent threads will jumble output.
+        # Consider hooking into CrewAI's callback system or using thread-local redirection.
+        sys.stdout = StreamCatcher(q)
         try:
             _emit(
                 q,
@@ -752,40 +855,9 @@ async def generate_code_stream(req: DevelopRequest):
                 elif event_type in ("stdout", "stderr"):
                     _emit(q, "cmd_output", {"stream": event_type, "line": data})
 
-            terminal_tool = TerminalExecutionTool(
-                workspace_path=workspace_path,
-                require_approval=require_approval,
-                approval_callback=approval_callback,
-                stream_callback=stream_callback,
+            tools = create_dev_tools(
+                workspace_path, require_approval, approval_callback, stream_callback, task_status
             )
-
-            write_file_tool = WriteFileTool(
-                workspace_path=workspace_path,
-                require_approval=require_approval,
-                approval_callback=approval_callback,
-            )
-
-            read_file_tool = ReadFileTool(workspace_path=workspace_path)
-
-            replace_in_file_tool = ReplaceInFileTool(
-                workspace_path=workspace_path,
-                require_approval=require_approval,
-                approval_callback=approval_callback,
-            )
-
-            edit_file_lines_tool = EditFileLinesTool(
-                workspace_path=workspace_path,
-                require_approval=require_approval,
-                approval_callback=approval_callback,
-            )
-
-            insert_at_line_tool = InsertAtLineTool(
-                workspace_path=workspace_path,
-                require_approval=require_approval,
-                approval_callback=approval_callback,
-            )
-
-            report_status_tool = ReportTaskStatusTool(result_holder=task_status)
 
             def check_abort(step_output):
                 if abort_event.is_set():
@@ -808,7 +880,7 @@ async def generate_code_stream(req: DevelopRequest):
 
             thinking_level = runtime_settings.get("thinking_level", "none")
             llm_kwargs = {}
-            if provider == "Google (Gemini)" and thinking_level != "none" and "gemini" in model:
+            if provider == "Google (Gemini)" and thinking_level != "none" and "gemini" in model.lower():
                 llm_kwargs["reasoning_effort"] = thinking_level
 
             my_llm = LLM(
@@ -823,15 +895,7 @@ async def generate_code_stream(req: DevelopRequest):
                 allow_delegation=False,
                 max_iter=75,
                 llm=my_llm,
-                tools=[
-                    terminal_tool,
-                    write_file_tool,
-                    read_file_tool,
-                    replace_in_file_tool,
-                    edit_file_lines_tool,
-                    insert_at_line_tool,
-                    report_status_tool,
-                ],
+                tools=tools,
                 step_callback=check_abort,
             )
 
@@ -872,9 +936,9 @@ async def generate_code_stream(req: DevelopRequest):
             metrics = {}
             if 'crew' in locals() and hasattr(crew, "usage_metrics") and crew.usage_metrics:
                 metrics = {
-                    "prompt_tokens": crew.usage_metrics.get("prompt_tokens", 0),
-                    "completion_tokens": crew.usage_metrics.get("completion_tokens", 0),
-                    "total_tokens": crew.usage_metrics.get("total_tokens", 0),
+                    "prompt_tokens": getattr(crew.usage_metrics, "prompt_tokens", 0),
+                    "completion_tokens": getattr(crew.usage_metrics, "completion_tokens", 0),
+                    "total_tokens": getattr(crew.usage_metrics, "total_tokens", 0),
                 }
             q.put(
                 f"event: done\ndata: {_json.dumps({'killed': killed, 'error': errored, 'status': final_status, 'status_summary': task_status.get('summary', ''), 'usage': metrics})}\n\n"
@@ -918,142 +982,16 @@ async def dev_iterate(req: IterateRequest):
 
     q = queue.Queue()
 
-    # Reuse the same StreamCatcher for parsing CrewAI ReAct output
-    class StreamCatcher:
-        def __init__(self):
-            self.buffer = ""
-            self.in_thinking = False
-
-        def write(self, text):
-            if not text or not text.strip():
-                return
-
-            clean = _strip_ansi(text)
-            if not clean:
-                return
-
-            if "<think>" in clean:
-                self.in_thinking = True
-                clean = clean.replace("<think>", "").strip()
-                if not clean:
-                    return
-            
-            if "</think>" in clean:
-                self.in_thinking = False
-                clean = clean.replace("</think>", "").strip()
-                if clean:
-                    _emit(q, "model_thinking", {"text": clean})
-                return
-
-            if self.in_thinking:
-                _emit(q, "model_thinking", {"text": clean})
-                return
-
-            if clean.startswith("Agent:") or clean.startswith("## Agent:"):
-                _emit(q, "system", {"text": clean, "level": "info"})
-                return
-            if clean.startswith("Task:") or clean.startswith("## Task:"):
-                _emit(q, "system", {"text": clean, "level": "info"})
-                return
-            if clean.startswith("Thought:") or clean.startswith("> Thinking:"):
-                thought_text = clean.split(":", 1)[1].strip() if ":" in clean else clean
-                _emit(q, "thought", {"text": thought_text})
-                return
-            if clean.startswith("Action:"):
-                tool_name = clean.split(":", 1)[1].strip() if ":" in clean else clean
-                _emit(q, "tool_call", {"tool": tool_name, "input": ""})
-                return
-            if clean.startswith("Action Input:"):
-                action_input = clean.split(":", 1)[1].strip() if ":" in clean else clean
-                _emit(q, "tool_input", {"input": action_input})
-                return
-            if clean.startswith("Observation:") or clean.startswith("Tool Result:"):
-                result_text = clean.split(":", 1)[1].strip() if ":" in clean else clean
-
-                cwd = ""
-                cmd = ""
-                stdout = ""
-                stderr = ""
-                exit_code = None
-                success = True
-
-                if "[CWD]" in result_text:
-                    parts = result_text
-                    cwd_match = _re.search(r"\[CWD\]\s*(.+?)(?:\n|\[CMD\]|$)", parts)
-                    cmd_match = _re.search(
-                        r"\[CMD\]\s*(.+?)(?:\n|\[STDOUT\]|\[STDERR\]|\[EXIT\]|$)", parts
-                    )
-                    stdout_match = _re.search(
-                        r"\[STDOUT\]\s*\n?(.*?)(?:\[STDERR\]|\[EXIT\]|$)",
-                        parts,
-                        _re.DOTALL,
-                    )
-                    stderr_match = _re.search(
-                        r"\[STDERR\]\s*\n?(.*?)(?:\[EXIT\]|$)", parts, _re.DOTALL
-                    )
-                    exit_match = _re.search(r"\[EXIT\]\s*(\d+)", parts)
-
-                    if cwd_match:
-                        cwd = cwd_match.group(1).strip()
-                    if cmd_match:
-                        cmd = cmd_match.group(1).strip()
-                    if stdout_match:
-                        stdout = stdout_match.group(1).strip()
-                    if stderr_match:
-                        stderr = stderr_match.group(1).strip()
-                    if exit_match:
-                        exit_code = int(exit_match.group(1))
-
-                    success = "[SUCCESS]" in result_text or exit_code == 0
-
-                    _emit(
-                        q,
-                        "tool_result",
-                        {
-                            "tool": "terminal",
-                            "cwd": cwd,
-                            "cmd": cmd,
-                            "stdout": stdout,
-                            "stderr": stderr,
-                            "exit_code": exit_code,
-                            "success": success,
-                            "raw": result_text[:500],
-                        },
-                    )
-                else:
-                    _emit(
-                        q,
-                        "tool_result",
-                        {
-                            "tool": "file_op",
-                            "cwd": "",
-                            "cmd": "",
-                            "stdout": result_text[:500],
-                            "stderr": "",
-                            "exit_code": 0,
-                            "success": "[SUCCESS]" in result_text,
-                            "raw": result_text[:500],
-                        },
-                    )
-                return
-
-            if clean.startswith("Final Answer:"):
-                answer_text = clean.split(":", 1)[1].strip() if ":" in clean else clean
-                _emit(q, "final_answer", {"text": answer_text})
-                return
-
-            _emit(q, "log", {"text": clean})
-
-        def flush(self):
-            pass
-
     def run_iterate():
+        _thread_local.queue = q
         killed = False
         errored = False
         task_status = {}
         error_count = [0]
         old_stdout = sys.stdout
-        sys.stdout = StreamCatcher()
+        # TODO: sys.stdout is process-global — concurrent threads will jumble output.
+        # Consider hooking into CrewAI's callback system or using thread-local redirection.
+        sys.stdout = StreamCatcher(q)
         try:
             _emit(
                 q,
@@ -1088,35 +1026,9 @@ async def dev_iterate(req: IterateRequest):
                 elif event_type in ("stdout", "stderr"):
                     _emit(q, "cmd_output", {"stream": event_type, "line": data})
 
-            terminal_tool = TerminalExecutionTool(
-                workspace_path=workspace_path,
-                require_approval=require_approval,
-                approval_callback=approval_callback,
-                stream_callback=stream_callback,
+            tools = create_dev_tools(
+                workspace_path, require_approval, approval_callback, stream_callback, task_status
             )
-            write_file_tool = WriteFileTool(
-                workspace_path=workspace_path,
-                require_approval=require_approval,
-                approval_callback=approval_callback,
-            )
-            read_file_tool = ReadFileTool(workspace_path=workspace_path)
-            replace_in_file_tool = ReplaceInFileTool(
-                workspace_path=workspace_path,
-                require_approval=require_approval,
-                approval_callback=approval_callback,
-            )
-            edit_file_lines_tool = EditFileLinesTool(
-                workspace_path=workspace_path,
-                require_approval=require_approval,
-                approval_callback=approval_callback,
-            )
-            insert_at_line_tool = InsertAtLineTool(
-                workspace_path=workspace_path,
-                require_approval=require_approval,
-                approval_callback=approval_callback,
-            )
-
-            report_status_tool = ReportTaskStatusTool(result_holder=task_status)
 
             def check_abort(step_output):
                 if abort_event.is_set():
@@ -1138,7 +1050,7 @@ async def dev_iterate(req: IterateRequest):
 
             thinking_level = runtime_settings.get("thinking_level", "none")
             llm_kwargs = {}
-            if provider == "Google (Gemini)" and thinking_level != "none" and "gemini" in model:
+            if provider == "Google (Gemini)" and thinking_level != "none" and "gemini" in model.lower():
                 llm_kwargs["reasoning_effort"] = thinking_level
 
             my_llm = LLM(
@@ -1153,15 +1065,7 @@ async def dev_iterate(req: IterateRequest):
                 allow_delegation=False,
                 max_iter=50,
                 llm=my_llm,
-                tools=[
-                    terminal_tool,
-                    write_file_tool,
-                    read_file_tool,
-                    replace_in_file_tool,
-                    edit_file_lines_tool,
-                    insert_at_line_tool,
-                    report_status_tool,
-                ],
+                tools=tools,
                 step_callback=check_abort,
             )
 
@@ -1206,9 +1110,9 @@ async def dev_iterate(req: IterateRequest):
             metrics = {}
             if 'crew' in locals() and hasattr(crew, "usage_metrics") and crew.usage_metrics:
                 metrics = {
-                    "prompt_tokens": crew.usage_metrics.get("prompt_tokens", 0),
-                    "completion_tokens": crew.usage_metrics.get("completion_tokens", 0),
-                    "total_tokens": crew.usage_metrics.get("total_tokens", 0),
+                    "prompt_tokens": getattr(crew.usage_metrics, "prompt_tokens", 0),
+                    "completion_tokens": getattr(crew.usage_metrics, "completion_tokens", 0),
+                    "total_tokens": getattr(crew.usage_metrics, "total_tokens", 0),
                 }
             q.put(
                 f"event: done\ndata: {_json.dumps({'killed': killed, 'error': errored, 'status': final_status, 'status_summary': task_status.get('summary', ''), 'usage': metrics})}\n\n"

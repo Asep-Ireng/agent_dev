@@ -6,6 +6,8 @@ import {
   Brain,
   ChevronDown,
   ChevronRight,
+  ChevronsRight,
+  ChevronsLeft,
   Terminal as TerminalIcon,
   CheckCircle,
   XCircle,
@@ -24,6 +26,9 @@ interface TerminalProps {
   handleCommandApproval: (approved: boolean) => void;
   expandedThoughts: Set<number>;
   setExpandedThoughts: React.Dispatch<React.SetStateAction<Set<number>>>;
+  showThinkingPanel: boolean;
+  onToggleThinkingPanel: () => void;
+  hasThinking: boolean;
 }
 
 export default function Terminal({
@@ -36,6 +41,9 @@ export default function Terminal({
   handleCommandApproval,
   expandedThoughts,
   setExpandedThoughts,
+  showThinkingPanel,
+  onToggleThinkingPanel,
+  hasThinking,
 }: TerminalProps) {
   const logsEndRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -82,11 +90,43 @@ export default function Terminal({
               </h3>
             </div>
           </div>
-          {developerLoading && (
-            <div className="flex items-center gap-1.5 font-mono text-xs text-[#E51937] font-semibold tracking-wide animate-pulse">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" /> Autonomous Agent Active
-            </div>
-          )}
+
+          <div className="flex items-center gap-3">
+            {developerLoading && (
+              <div className="flex items-center gap-1.5 font-mono text-xs text-[#E51937] font-semibold tracking-wide animate-pulse">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Autonomous Agent Active
+              </div>
+            )}
+
+            {/* Thinking panel toggle — always visible when terminal is shown */}
+            <button
+              onClick={onToggleThinkingPanel}
+              title={showThinkingPanel ? "Hide thinking panel" : "Show model thinking tokens"}
+              className={`group relative flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all duration-200
+                ${
+                  showThinkingPanel
+                    ? "bg-purple-500/20 border-purple-500/40 text-purple-300 hover:bg-purple-500/30"
+                    : "bg-white/5 border-white/10 text-[#F4F4F6]/40 hover:text-purple-300 hover:border-purple-500/30 hover:bg-purple-500/10"
+                }`}
+            >
+              <Brain className={`w-3.5 h-3.5 transition-colors ${
+                showThinkingPanel ? "text-purple-400" : "text-[#F4F4F6]/30 group-hover:text-purple-400"
+              }`} />
+              <span className="hidden sm:inline">Thinking</span>
+              {showThinkingPanel ? (
+                <ChevronsLeft className="w-3.5 h-3.5" />
+              ) : (
+                <ChevronsRight className="w-3.5 h-3.5" />
+              )}
+              {/* Live dot when tokens are streaming */}
+              {hasThinking && developerLoading && (
+                <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-purple-400" />
+                </span>
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Terminal Window Block */}

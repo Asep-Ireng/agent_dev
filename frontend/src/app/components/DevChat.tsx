@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Code2, Send, Paperclip, Loader2, ChevronDown, ChevronRight, Eye } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import dynamic from "next/dynamic";
+import ModelPicker from "./ModelPicker";
 
 const PatchDiff = dynamic(
   () => import("@pierre/diffs/react").then((mod) => mod.PatchDiff),
@@ -30,6 +31,9 @@ interface DevChatProps {
   workspaceDiff: string;
   fetchWorkspaceDiff: () => void;
   totalTokens: { prompt: number; completion: number; total: number };
+  model: string;
+  provider: string;
+  updateBackendSettings: (provider?: string, model?: string, thinkingLevel?: string) => void;
 }
 
 export default function DevChat({
@@ -51,6 +55,9 @@ export default function DevChat({
   workspaceDiff,
   fetchWorkspaceDiff,
   totalTokens,
+  model,
+  provider,
+  updateBackendSettings,
 }: DevChatProps) {
   const devChatEndRef = useRef<HTMLDivElement>(null);
   const [isDiffExpanded, setIsDiffExpanded] = useState(false);
@@ -265,6 +272,12 @@ export default function DevChat({
                   <Paperclip className="w-4 h-4" />
                 </label>
               </div>
+              <ModelPicker
+                model={model}
+                provider={provider}
+                updateBackendSettings={updateBackendSettings}
+                className="h-[38px]"
+              />
               <button
                 onClick={handleDevChat}
                 disabled={!devChatInput.trim() || devChatLoading}

@@ -51,3 +51,30 @@ body {
   background: #e51937;
 }
 
+/* Custom scrollbar for terminal, chat panels, and other scrollable containers */
+.custom-scrollbar::-webkit-scrollbar { width: 8px; }
+.custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+.custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
+.custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
+/* Global Premium Text Selection Style */
+::selection {
+  background-color: rgba(229, 25, 55, 0.35); /* Sleek semi-transparent orange/red selection */
+  color: #f4f4f6;
+}
+
+input::selection,
+textarea::selection {
+  background-color: rgba(229, 25, 55, 0.5) !important; /* Slightly more opaque selection in input fields for perfect readability */
+  color: #ffffff !important;
+}
+
+/* Custom selection override specifically for solid red elements (e.g., user chat bubbles) */
+.bg-\[\#E51937\]::selection,
+.bg-\[\#E51937\] *::selection {
+  background-color: #ffffff !important;
+  color: #0f0f11 !important;
+}
+
+
+

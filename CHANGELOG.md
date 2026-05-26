@@ -4,6 +4,17 @@ All notable changes to the **AI Agent Developer** platform are documented in thi
 
 ---
 
+## [1.2.1] - 2026-05-26
+
+### Added & Improved
+- **Premium Model Selection Experience (`ModelPicker.tsx`)**:
+  - Completely redesigned the inline model selector into an ultra-premium glassmorphic controls dropdown.
+  - Implemented fluid `framer-motion` scale-up and fade-in bottom-anchored animations for a seamless interactive feel.
+  - Added an integrated **Segmented Provider Controller** at the top of the picker, allowing users to toggle between Google Gemini (crimson theme) and OpenAI (emerald theme) with a single click.
+  - Engineered responsive active highlights, featuring glowing left indicator bars and custom colored checkmarks matching the provider's aesthetic.
+  - Enhanced trigger button styling to include dynamic status breathing glows (rose/ruby for Gemini, emerald for OpenAI) and matching custom-colored model status icons.
+  - Standardized component layouts to perfectly match the height of neighbor inputs across the platform (aligned to `h-11` in `DesignChat.tsx` and `h-[38px]` in `DevChat.tsx`).
+
 ## [1.2.0] - 2026-05-20
 
 ### Added

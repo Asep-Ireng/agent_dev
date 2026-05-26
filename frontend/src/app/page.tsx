@@ -1,9 +1,11 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
-import { motion } from "framer-motion";
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { ChevronUp } from "lucide-react";
 import { LogEntry } from "./types";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 import Sidebar from "./components/Sidebar";
 import DesignChat from "./components/DesignChat";
@@ -11,6 +13,7 @@ import SpecViewer from "./components/SpecViewer";
 import Terminal from "./components/Terminal";
 import AgentResult from "./components/AgentResult";
 import DevChat from "./components/DevChat";
+import ThinkingPanel from "./components/ThinkingPanel";
 
 export default function Home() {
   const [provider, setProvider] = useState("Google (Gemini)");
@@ -42,6 +45,9 @@ export default function Home() {
     new Set()
   );
   const [agentResult, setAgentResult] = useState<string>("");
+  const [thinkingText, setThinkingText] = useState("");
+  const [designThinkingText, setDesignThinkingText] = useState("");
+  const [showThinkingPanel, setShowThinkingPanel] = useState(false);
   const [devChatMessages, setDevChatMessages] = useState<
     { role: string; content: string }[]
   >([]);
@@ -56,10 +62,74 @@ export default function Home() {
     completion: 0,
     total: 0,
   });
+  const mainRef = useRef<HTMLElement>(null);
+  const prevLoadingRef = useRef(false);
+
+  // Auto-open thinking panel when tokens start arriving; auto-close when agent finishes
+  useEffect(() => {
+    if (thinkingText && developerLoading && !showThinkingPanel) {
+      setShowThinkingPanel(true);
+    }
+    if (prevLoadingRef.current && !developerLoading) {
+      // Agent just finished — give user a moment to see last tokens, then keep panel open
+      // (they can close it with the X button)
+      prevLoadingRef.current = false;
+    }
+    prevLoadingRef.current = developerLoading;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [developerLoading, thinkingText]);
+
+  // Buffered log accumulation to avoid per-line array copies during heavy SSE output
+  const logBufferRef = useRef<LogEntry[]>([]);
+  const flushTimerRef = useRef<number | null>(null);
+
+  const addLog = useCallback((entry: LogEntry) => {
+    logBufferRef.current.push(entry);
+    if (!flushTimerRef.current) {
+      flushTimerRef.current = requestAnimationFrame(() => {
+        setActionLogs((prev) => {
+          const newLogs = [...prev];
+          for (const item of logBufferRef.current) {
+            const lastLog = newLogs[newLogs.length - 1];
+            if (
+              lastLog &&
+              item.type === lastLog.type &&
+              (item.type === "model_thinking" || item.type === "log" || item.type === "thought")
+            ) {
+              newLogs[newLogs.length - 1] = {
+                ...lastLog,
+                text: ((lastLog as any).text || "") + ((item as any).text || ""),
+              } as LogEntry;
+            } else {
+              newLogs.push(item);
+            }
+          }
+          return newLogs;
+        });
+        logBufferRef.current = [];
+        flushTimerRef.current = null;
+      });
+    }
+  }, []);
+
+  const accumulateTokens = useCallback(
+    (usage: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      total_tokens?: number;
+    }) => {
+      setTotalTokens((prev) => ({
+        prompt: prev.prompt + (usage.prompt_tokens || 0),
+        completion: prev.completion + (usage.completion_tokens || 0),
+        total: prev.total + (usage.total_tokens || 0),
+      }));
+    },
+    []
+  );
 
   // Fetch settings from backend on mount
   useEffect(() => {
-    fetch("http://localhost:8000/api/settings")
+    fetch(`${API_BASE}/api/settings`)
       .then((res) => res.json())
       .then((data) => {
         setProvider(data.provider);
@@ -69,20 +139,31 @@ export default function Home() {
         if (data.thinking_level) setThinkingLevel(data.thinking_level);
         if (data.workspace_path) setWorkspacePath(data.workspace_path);
       })
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   // Sync provider/model changes to backend
   const updateBackendSettings = (newProvider?: string, newModel?: string, newThinkingLevel?: string) => {
+    // Update local state immediately
+    if (newProvider !== undefined) {
+      setProvider(newProvider);
+    }
+    if (newModel !== undefined) {
+      setModel(newModel);
+      if ((newProvider ?? provider) === "OpenAI") setOpenaiModel(newModel);
+      else setGoogleModel(newModel);
+    }
+    if (newThinkingLevel !== undefined) setThinkingLevel(newThinkingLevel);
+
     const body: Record<string, string> = {};
     if (newProvider !== undefined) body.provider = newProvider;
     if (newModel !== undefined) body.model = newModel;
     if (newThinkingLevel !== undefined) body.thinking_level = newThinkingLevel;
-    fetch("http://localhost:8000/api/settings", {
+    fetch(`${API_BASE}/api/settings`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }).catch(() => {});
+    }).catch(() => { });
   };
 
   const handleChatSubmit = async () => {
@@ -92,6 +173,7 @@ export default function Home() {
     setChatHistory((prev) => [...prev, { role: "user", content: userText }]);
     setCurrentMessage("");
     setDesignerLoading(true);
+    setDesignThinkingText("");
 
     try {
       const formData = new FormData();
@@ -99,7 +181,7 @@ export default function Home() {
       formData.append("spec", spec); // send current spec context
       attachedFiles.forEach((file) => formData.append("files", file));
 
-      const res = await fetch("http://localhost:8000/api/design/chat", {
+      const res = await fetch(`${API_BASE}/api/design/chat`, {
         method: "POST",
         body: formData,
       });
@@ -108,11 +190,7 @@ export default function Home() {
       if (!res.ok) throw new Error(data.detail || "API failed");
 
       if (data.usage) {
-        setTotalTokens((prev) => ({
-          prompt: prev.prompt + (data.usage.prompt_tokens || 0),
-          completion: prev.completion + (data.usage.completion_tokens || 0),
-          total: prev.total + (data.usage.total_tokens || 0),
-        }));
+        accumulateTokens(data.usage);
       }
 
       setSpec(data.spec);
@@ -134,8 +212,41 @@ export default function Home() {
     }
   };
 
-  const addLog = (entry: LogEntry) => {
-    setActionLogs((prev) => [...prev, entry]);
+  const processSSEStream = async (
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    onEvent: (eventType: string, data: Record<string, unknown>) => void,
+    onDone: (data: Record<string, unknown>) => void
+  ) => {
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      let currentEvent = "";
+      for (const line of lines) {
+        if (line.startsWith("event: ")) {
+          currentEvent = line.slice(7).trim();
+        } else if (line.startsWith("data: ")) {
+          const dataStr = line.slice(6);
+          try {
+            const data = JSON.parse(dataStr);
+            if (currentEvent === "done") {
+              onDone(data);
+              return;
+            }
+            onEvent(currentEvent, data);
+          } catch (e) {
+            console.error(`Failed to parse ${currentEvent} event:`, e);
+          }
+        }
+      }
+    }
   };
 
   const handleDevelop = () => {
@@ -143,90 +254,9 @@ export default function Home() {
     setActionLogs([]);
     setExpandedThoughts(new Set());
     setAgentResult("");
+    setThinkingText("");
     setDevChatMessages([]);
     setDevChatInput("");
-
-    const processSSEStream = async (
-      reader: ReadableStreamDefaultReader<Uint8Array>
-    ) => {
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        let currentEvent = "";
-        for (const line of lines) {
-          if (line.startsWith("event: ")) {
-            currentEvent = line.slice(7).trim();
-          } else if (line.startsWith("data: ")) {
-            const dataStr = line.slice(6);
-            try {
-              const data = JSON.parse(dataStr);
-              handleSSEEvent(currentEvent, data);
-
-              if (currentEvent === "done") {
-                if (data.usage) {
-                  setTotalTokens((prev) => ({
-                    prompt: prev.prompt + (data.usage.prompt_tokens || 0),
-                    completion: prev.completion + (data.usage.completion_tokens || 0),
-                    total: prev.total + (data.usage.total_tokens || 0),
-                  }));
-                }
-                const status =
-                  data.status ||
-                  (data.killed ? "killed" : data.error ? "failed" : "success");
-                const summary = data.status_summary
-                  ? ` — ${data.status_summary}`
-                  : "";
-                switch (status) {
-                  case "killed":
-                    addLog({
-                      type: "system",
-                      text: "Agent stopped by user.",
-                      level: "warn",
-                    });
-                    break;
-                  case "failed":
-                    addLog({
-                      type: "system",
-                      text: `Development failed.${summary}`,
-                      level: "error",
-                    });
-                    break;
-                  case "partial":
-                    addLog({
-                      type: "system",
-                      text: `Development partially completed — some issues occurred.${summary}`,
-                      level: "warn",
-                    });
-                    break;
-                  case "success":
-                  default:
-                    addLog({
-                      type: "system",
-                      text: `Development completed successfully!${summary}`,
-                      level: "info",
-                    });
-                    break;
-                }
-                setPendingCommand(null);
-                setDeveloperLoading(false);
-                fetchWorkspaceDiff();
-                return;
-              }
-            } catch (e) {
-              console.error(`Failed to parse ${currentEvent} event:`, e);
-            }
-          }
-        }
-      }
-    };
 
     const handleSSEEvent = (
       eventType: string,
@@ -238,6 +268,7 @@ export default function Home() {
           break;
         case "model_thinking":
           addLog({ type: "model_thinking", text: data.text as string });
+          setThinkingText((prev) => prev + (data.text as string));
           break;
         case "tool_call":
           addLog({
@@ -298,7 +329,7 @@ export default function Home() {
       }
     };
 
-    fetch("http://localhost:8000/api/develop", {
+    fetch(`${API_BASE}/api/develop`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -310,7 +341,37 @@ export default function Home() {
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const reader = res.body!.getReader();
-        return processSSEStream(reader);
+        return processSSEStream(
+          reader,
+          handleSSEEvent,
+          (data) => {
+            if (data.usage) accumulateTokens(data.usage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number });
+            const status =
+              data.status ||
+              (data.killed ? "killed" : data.error ? "failed" : "success");
+            const summary = data.status_summary
+              ? ` — ${data.status_summary}`
+              : "";
+            switch (status) {
+              case "killed":
+                addLog({ type: "system", text: "Agent stopped by user.", level: "warn" });
+                break;
+              case "failed":
+                addLog({ type: "system", text: `Development failed.${summary}`, level: "error" });
+                break;
+              case "partial":
+                addLog({ type: "system", text: `Development partially completed — some issues occurred.${summary}`, level: "warn" });
+                break;
+              case "success":
+              default:
+                addLog({ type: "system", text: `Development completed successfully!${summary}`, level: "info" });
+                break;
+            }
+            setPendingCommand(null);
+            setDeveloperLoading(false);
+            fetchWorkspaceDiff();
+          }
+        );
       })
       .catch((err) => {
         console.error("Develop stream failed:", err);
@@ -327,7 +388,7 @@ export default function Home() {
   const handleStopDevelop = async () => {
     try {
       addLog({ type: "system", text: "Sending kill signal...", level: "warn" });
-      await fetch("http://localhost:8000/api/develop/stop", { method: "POST" });
+      await fetch(`${API_BASE}/api/develop/stop`, { method: "POST" });
     } catch (err) {
       console.error("Failed to send stop signal:", err);
     }
@@ -336,7 +397,7 @@ export default function Home() {
   const fetchWorkspaceDiff = async () => {
     try {
       const res = await fetch(
-        `http://localhost:8000/api/workspace/diff?workspace_path=${encodeURIComponent(
+        `${API_BASE}/api/workspace/diff?workspace_path=${encodeURIComponent(
           workspacePath
         )}`
       );
@@ -358,9 +419,8 @@ export default function Home() {
     const modeLabel = devChatMode === "apply" ? "🔧" : "💬";
     const displayText =
       filesToSend.length > 0
-        ? `${modeLabel} ${userMessage} [📎 ${filesToSend.length} file${
-            filesToSend.length > 1 ? "s" : ""
-          }]`
+        ? `${modeLabel} ${userMessage} [📎 ${filesToSend.length} file${filesToSend.length > 1 ? "s" : ""
+        }]`
         : `${modeLabel} ${userMessage}`;
     setDevChatMessages((prev) => [
       ...prev,
@@ -380,7 +440,7 @@ export default function Home() {
         formData.append("history", JSON.stringify(devChatMessages));
         filesToSend.forEach((file) => formData.append("files", file));
 
-        const response = await fetch("http://localhost:8000/api/dev-chat", {
+        const response = await fetch(`${API_BASE}/api/dev-chat`, {
           method: "POST",
           body: formData,
         });
@@ -389,11 +449,7 @@ export default function Home() {
 
         const data = await response.json();
         if (data.usage) {
-          setTotalTokens((prev) => ({
-            prompt: prev.prompt + (data.usage.prompt_tokens || 0),
-            completion: prev.completion + (data.usage.completion_tokens || 0),
-            total: prev.total + (data.usage.total_tokens || 0),
-          }));
+          accumulateTokens(data.usage);
         }
         setPendingApplyTask(userMessage);
         setDevChatMessages((prev) => [
@@ -425,7 +481,7 @@ export default function Home() {
         formData.append("history", JSON.stringify(devChatMessages));
         filesToSend.forEach((file) => formData.append("files", file));
 
-        const response = await fetch("http://localhost:8000/api/dev-chat", {
+        const response = await fetch(`${API_BASE}/api/dev-chat`, {
           method: "POST",
           body: formData,
         });
@@ -434,11 +490,7 @@ export default function Home() {
 
         const data = await response.json();
         if (data.usage) {
-          setTotalTokens((prev) => ({
-            prompt: prev.prompt + (data.usage.prompt_tokens || 0),
-            completion: prev.completion + (data.usage.completion_tokens || 0),
-            total: prev.total + (data.usage.total_tokens || 0),
-          }));
+          accumulateTokens(data.usage);
         }
         setDevChatMessages((prev) => [
           ...prev,
@@ -471,6 +523,7 @@ export default function Home() {
     ]);
     setDeveloperLoading(true);
     setActionLogs([]);
+    setThinkingText("");
 
     const chatContext = devChatMessages
       .filter(
@@ -489,112 +542,61 @@ export default function Home() {
       ? `${taskToExecute}\n\n--- Chat Context ---\n${chatContext}`
       : taskToExecute;
 
-    const processSSEStream = async (
-      reader: ReadableStreamDefaultReader<Uint8Array>
+    const handleIterateSSEEvent = (
+      eventType: string,
+      data: Record<string, unknown>
     ) => {
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        let currentEvent = "";
-        for (const line of lines) {
-          if (line.startsWith("event: ")) {
-            currentEvent = line.slice(7).trim();
-          } else if (line.startsWith("data: ")) {
-            const dataStr = line.slice(6);
-            try {
-              const data = JSON.parse(dataStr);
-
-              switch (currentEvent) {
-                case "thought":
-                  addLog({ type: "thought", text: data.text });
-                  break;
-                case "tool_call":
-                  addLog({
-                    type: "tool_call",
-                    tool: data.tool,
-                    input: data.input,
-                  });
-                  break;
-                case "tool_input":
-                  addLog({ type: "tool_input", input: data.input });
-                  break;
-                case "tool_result":
-                  addLog({ type: "tool_result", ...data });
-                  break;
-                case "final_answer":
-                  addLog({ type: "final_answer", text: data.text });
-                  break;
-                case "system":
-                  addLog({
-                    type: "system",
-                    text: data.text,
-                    level: data.level,
-                  });
-                  break;
-                case "log":
-                  addLog({ type: "log", text: data.text });
-                  break;
-                case "cmd_start":
-                  addLog({ type: "cmd_start", cwd: data.cwd, cmd: data.cmd });
-                  break;
-                case "cmd_output":
-                  addLog({
-                    type: "cmd_output",
-                    stream: data.stream,
-                    line: data.line,
-                  });
-                  break;
-                case "cmd_end":
-                  addLog({
-                    type: "cmd_end",
-                    exit_code: data.exit_code,
-                    success: data.success,
-                  });
-                  break;
-                case "action_required":
-                  setPendingCommand(data.command);
-                  break;
-                case "result":
-                  if (data.text) {
-                    setDevChatMessages((prev) => [
-                      ...prev,
-                      {
-                        role: "assistant",
-                        content: `✅ **Changes Applied:**\n\n${data.text}`,
-                      },
-                    ]);
-                    setAgentResult(data.text);
-                  }
-                  break;
-                case "done":
-                  if (data.usage) {
-                    setTotalTokens((prev) => ({
-                      prompt: prev.prompt + (data.usage.prompt_tokens || 0),
-                      completion: prev.completion + (data.usage.completion_tokens || 0),
-                      total: prev.total + (data.usage.total_tokens || 0),
-                    }));
-                  }
-                  setDeveloperLoading(false);
-                  fetchWorkspaceDiff();
-                  return;
-              }
-            } catch (e) {
-              console.error(`Failed to parse ${currentEvent} event:`, e);
-            }
+      switch (eventType) {
+        case "thought":
+          addLog({ type: "thought", text: data.text as string });
+          break;
+        case "model_thinking":
+          addLog({ type: "model_thinking", text: data.text as string });
+          setThinkingText((prev) => prev + (data.text as string));
+          break;
+        case "tool_call":
+          addLog({ type: "tool_call", tool: data.tool as string, input: data.input as string });
+          break;
+        case "tool_input":
+          addLog({ type: "tool_input", input: data.input as string });
+          break;
+        case "tool_result":
+          addLog({ type: "tool_result", ...data } as LogEntry);
+          break;
+        case "final_answer":
+          addLog({ type: "final_answer", text: data.text as string });
+          break;
+        case "system":
+          addLog({ type: "system", text: data.text as string, level: (data.level as "info" | "warn" | "error") || "info" });
+          break;
+        case "log":
+          addLog({ type: "log", text: data.text as string });
+          break;
+        case "cmd_start":
+          addLog({ type: "cmd_start", cwd: data.cwd as string, cmd: data.cmd as string });
+          break;
+        case "cmd_output":
+          addLog({ type: "cmd_output", stream: data.stream as "stdout" | "stderr", line: data.line as string });
+          break;
+        case "cmd_end":
+          addLog({ type: "cmd_end", exit_code: data.exit_code as number, success: data.success as boolean });
+          break;
+        case "action_required":
+          setPendingCommand(data.command as string);
+          break;
+        case "result":
+          if (data.text) {
+            setDevChatMessages((prev) => [
+              ...prev,
+              { role: "assistant", content: `✅ **Changes Applied:**\n\n${data.text}` },
+            ]);
+            setAgentResult(data.text as string);
           }
-        }
+          break;
       }
     };
 
-    fetch("http://localhost:8000/api/dev-iterate", {
+    fetch(`${API_BASE}/api/dev-iterate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -608,7 +610,15 @@ export default function Home() {
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const reader = res.body!.getReader();
-        return processSSEStream(reader);
+        return processSSEStream(
+          reader,
+          handleIterateSSEEvent,
+          (data) => {
+            if (data.usage) accumulateTokens(data.usage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number });
+            setDeveloperLoading(false);
+            fetchWorkspaceDiff();
+          }
+        );
       })
       .catch((err) => {
         console.error("Iterate stream failed:", err);
@@ -624,7 +634,7 @@ export default function Home() {
   const handleCommandApproval = async (approved: boolean) => {
     try {
       setPendingCommand(null);
-      await fetch("http://localhost:8000/api/develop/approve", {
+      await fetch(`${API_BASE}/api/develop/approve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -659,7 +669,7 @@ export default function Home() {
         updateBackendSettings={updateBackendSettings}
       />
 
-      <main className="flex-1 overflow-y-auto p-10 relative bg-grid">
+      <main ref={mainRef} className="flex-1 overflow-y-auto p-10 relative bg-grid">
         <div className="max-w-4xl mx-auto space-y-12 pb-32">
           {/* HEADER AREA */}
           <motion.div
@@ -670,10 +680,10 @@ export default function Home() {
           >
             <div className="space-y-1">
               <span className="text-[11px] font-mono text-[#E51937] tracking-widest uppercase block mb-1">
-                ENGINEERING CONTROL DESK
+                ClankerSlave CONTROL DESK
               </span>
               <h2 className="text-3xl font-bold text-[#F4F4F6] tracking-tight">
-                What are we building?
+                Mau buat apa Sepuh?
               </h2>
               <p className="text-[#F4F4F6]/60 text-xs font-mono">
                 [SYS] Enter a high level idea and watch the agents build the software.
@@ -719,6 +729,10 @@ export default function Home() {
               setAttachedFiles={setAttachedFiles}
               designerLoading={designerLoading}
               handleChatSubmit={handleChatSubmit}
+              thinkingText={designThinkingText}
+              model={model}
+              provider={provider}
+              updateBackendSettings={updateBackendSettings}
             />
 
             <SpecViewer
@@ -733,17 +747,35 @@ export default function Home() {
             />
           </div>
 
-          <Terminal
-            actionLogs={actionLogs}
-            developerLoading={developerLoading}
-            workspacePath={workspacePath}
-            pendingCommand={pendingCommand}
-            rejectReason={rejectReason}
-            setRejectReason={setRejectReason}
-            handleCommandApproval={handleCommandApproval}
-            expandedThoughts={expandedThoughts}
-            setExpandedThoughts={setExpandedThoughts}
-          />
+          {/* Terminal + Thinking split layout */}
+          <div className="flex gap-4 transition-all duration-300">
+            <div className={`transition-all duration-500 ${showThinkingPanel ? "flex-[3]" : "flex-1"} min-w-0`}>
+              <Terminal
+                actionLogs={actionLogs}
+                developerLoading={developerLoading}
+                workspacePath={workspacePath}
+                pendingCommand={pendingCommand}
+                rejectReason={rejectReason}
+                setRejectReason={setRejectReason}
+                handleCommandApproval={handleCommandApproval}
+                expandedThoughts={expandedThoughts}
+                setExpandedThoughts={setExpandedThoughts}
+                showThinkingPanel={showThinkingPanel}
+                onToggleThinkingPanel={() => setShowThinkingPanel((v) => !v)}
+                hasThinking={thinkingText.length > 0}
+              />
+            </div>
+
+            <AnimatePresence>
+              {showThinkingPanel && (
+                <ThinkingPanel
+                  thinkingText={thinkingText}
+                  isActive={developerLoading}
+                  onClose={() => setShowThinkingPanel(false)}
+                />
+              )}
+            </AnimatePresence>
+          </div>
 
           <AgentResult
             agentResult={agentResult}
@@ -769,28 +801,20 @@ export default function Home() {
             workspaceDiff={workspaceDiff}
             fetchWorkspaceDiff={fetchWorkspaceDiff}
             totalTokens={totalTokens}
+            model={model}
+            provider={provider}
+            updateBackendSettings={updateBackendSettings}
           />
         </div>
       </main>
 
       <button
-        onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+        onClick={() => mainRef.current?.scrollTo({ top: 0, behavior: "smooth" })}
         className="fixed bottom-6 right-6 z-50 w-10 h-10 bg-[#27272a]/80 hover:bg-[#27272a] text-[#F4F4F6] rounded-full shadow-lg shadow-black/30 flex items-center justify-center transition-all hover:scale-110 active:scale-95 backdrop-blur-sm border border-white/10"
         title="Scroll to top"
       >
         <ChevronUp className="w-5 h-5" />
       </button>
-
-      <style
-        dangerouslySetInnerHTML={{
-          __html: `
-        .custom-scrollbar::-webkit-scrollbar { width: 8px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
-      `,
-        }}
-      />
     </div>
   );
 }

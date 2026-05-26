@@ -1,5 +1,8 @@
-import React from "react";
-import { Sparkles, Box, Loader2, Paperclip, Send } from "lucide-react";
+import React, { useState } from "react";
+import ReactMarkdown from "react-markdown";
+import { motion, AnimatePresence } from "framer-motion";
+import { Sparkles, Box, Loader2, Paperclip, Send, Brain, ChevronDown, ChevronUp } from "lucide-react";
+import ModelPicker from "./ModelPicker";
 
 interface DesignChatProps {
   chatHistory: { role: "user" | "agent"; content: string }[];
@@ -9,6 +12,10 @@ interface DesignChatProps {
   setAttachedFiles: React.Dispatch<React.SetStateAction<File[]>>;
   designerLoading: boolean;
   handleChatSubmit: () => void;
+  thinkingText?: string;
+  model: string;
+  provider: string;
+  updateBackendSettings: (provider?: string, model?: string, thinkingLevel?: string) => void;
 }
 
 export default function DesignChat({
@@ -19,7 +26,13 @@ export default function DesignChat({
   setAttachedFiles,
   designerLoading,
   handleChatSubmit,
+  thinkingText = "",
+  model,
+  provider,
+  updateBackendSettings,
 }: DesignChatProps) {
+  const [showThinking, setShowThinking] = useState(false);
+  const hasThinking = thinkingText.length > 0;
   return (
     <div className="flex flex-col bg-black/20 border border-[#F4F4F6]/5 rounded-2xl shadow-xl overflow-hidden h-full">
       <div className="p-4 bg-gradient-to-r from-[#E51937]/15 to-[#E51937]/5 border-b border-[#F4F4F6]/5 relative">
@@ -52,20 +65,72 @@ export default function DesignChat({
             <div
               className={`max-w-[80%] rounded-2xl px-4 py-2 text-sm ${
                 msg.role === "user"
-                  ? "bg-[#E51937] text-[#0F0F11] font-medium"
+                  ? "bg-[#E51937] text-[#0F0F11] font-medium selection:bg-white selection:text-[#0F0F11]"
                   : "bg-white/5 border border-white/10 text-[#F4F4F6]/90"
               }`}
             >
-              {msg.content}
+              {msg.role === "agent" ? (
+                <div className="prose prose-sm prose-invert max-w-none">
+                  <ReactMarkdown>{msg.content}</ReactMarkdown>
+                </div>
+              ) : (
+                msg.content
+              )}
             </div>
           </div>
         ))}
         {designerLoading && (
-          <div className="flex justify-start">
-            <div className="max-w-[80%] rounded-2xl px-4 py-2 text-sm bg-white/5 border border-white/10 text-[#F4F4F6]/60 flex items-center gap-2">
-              <Loader2 className="w-4 h-4 animate-spin" /> Rethinking
-              architecture...
+          <div className="flex flex-col gap-2">
+            <div className="flex justify-start items-center gap-2">
+              <div className="max-w-[80%] rounded-2xl px-4 py-2 text-sm bg-white/5 border border-white/10 text-[#F4F4F6]/60 flex items-center gap-2">
+                <Loader2 className="w-4 h-4 animate-spin" /> Rethinking
+                architecture...
+              </div>
+              {/* Thinking button — always visible during loading */}
+              <button
+                onClick={() => setShowThinking((v) => !v)}
+                title={showThinking ? "Hide thinking" : "Show model thinking"}
+                className={`relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold transition-all duration-200 shrink-0
+                  ${
+                    showThinking
+                      ? "bg-purple-500/20 border-purple-500/40 text-purple-300"
+                      : "bg-white/5 border-white/10 text-[#F4F4F6]/30 hover:text-purple-300 hover:border-purple-500/30 hover:bg-purple-500/10"
+                  }`}
+              >
+                <Brain className="w-3 h-3" />
+                {showThinking ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                {hasThinking && (
+                  <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-purple-400 opacity-75" />
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-purple-400" />
+                  </span>
+                )}
+              </button>
             </div>
+
+            {/* Inline thinking panel */}
+            <AnimatePresence>
+              {showThinking && hasThinking && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: "auto" }}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={{ duration: 0.2 }}
+                  className="overflow-hidden ml-2"
+                >
+                  <div className="border border-purple-500/20 bg-purple-900/10 rounded-xl p-3 max-h-48 overflow-y-auto custom-scrollbar">
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <Brain className="w-3 h-3 text-purple-400" />
+                      <span className="text-[9px] font-mono text-purple-400/60 uppercase tracking-widest">Model Internal Thinking</span>
+                    </div>
+                    <p className="text-[11px] font-mono text-purple-200/60 whitespace-pre-wrap leading-relaxed">
+                      {thinkingText}
+                      <span className="inline-block w-1.5 h-3 bg-purple-400/60 ml-0.5 animate-pulse rounded-sm align-middle" />
+                    </p>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
         )}
       </div>
@@ -152,10 +217,17 @@ export default function DesignChat({
             </label>
           </div>
 
+          <ModelPicker
+            model={model}
+            provider={provider}
+            updateBackendSettings={updateBackendSettings}
+            className="h-11"
+          />
+
           <button
             onClick={handleChatSubmit}
             disabled={designerLoading}
-            className="p-3 bg-gradient-to-r from-[#E51937] to-[#E51937] text-[#F4F4F6] rounded-xl hover:brightness-110 transition-all active:scale-95 disabled:opacity-50 shadow-lg shadow-[#E51937]/30 shrink-0"
+            className="p-3 bg-gradient-to-r from-[#E51937] to-[#FF4D6A] text-[#F4F4F6] rounded-xl hover:brightness-110 transition-all active:scale-95 disabled:opacity-50 shadow-lg shadow-[#E51937]/30 shrink-0"
           >
             <Send className="w-5 h-5" />
           </button>

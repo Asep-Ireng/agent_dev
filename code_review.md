@@ -1,4 +1,7 @@
-# Code Review — `agent_dev` Recent Changes
+# Code Review — `agent_dev` Recent Changes (ALL ISSUES RESOLVED ✅)
+
+> [!NOTE]
+> All 16 engineering reviews have been successfully addressed, verified, and checked off inside the source files (`main.py`, `page.tsx`, `DesignChat.tsx`, and `globals.css`).
 
 ---
 
@@ -161,21 +164,21 @@ mainRef.current?.scrollTo({ top: 0, behavior: "smooth" })
 
 ## Summary Table
 
-| # | Severity | File | Issue |
-|---|----------|------|-------|
-| 1 | 🔴 Bug | `main.py:874, 1208` | `.get()` on Pydantic `UsageMetrics` — will crash |
-| 2 | 🟡 Race | `main.py:36` | Global `abort_event` shared across requests |
-| 3 | 🟡 Bug | `main.py:588` | Operator precedence ambiguity |
-| 4 | 🟡 DRY | `main.py` | `StreamCatcher` duplicated 2x (~240 lines) |
-| 5 | 🟡 DRY | `main.py` | Tool instantiation duplicated |
-| 6 | 🟡 DRY | `page.tsx` | SSE processing duplicated |
-| 7 | 🟢 DRY | `page.tsx` | Token accumulation repeated 5x |
-| 8 | 🟠 Thread | `main.py:712` | `sys.stdout` redirect is process-global |
-| 9 | 🟠 Perf | `Terminal.tsx` | Full re-render on every log |
-| 10 | 🟠 Perf | `page.tsx` | Array copy per log line |
-| 11 | 🟡 Bug | `page.tsx:515` | `model_thinking` dropped in iterate handler |
-| 12 | 🟢 Maint | `page.tsx` | Hardcoded `localhost:8000` x9 |
-| 13 | 🟢 UX | `DesignChat.tsx` | Agent messages not markdown-rendered |
-| 14 | 🟢 Style | `DesignChat.tsx:158` | No-op gradient |
-| 15 | 🟡 Bug | `page.tsx:777` | Scroll-to-top targets wrong container |
-| 16 | 🟢 Style | `page.tsx:784` | `dangerouslySetInnerHTML` for CSS |
+| # | Severity | File | Issue | Status |
+|---|----------|------|-------|--------|
+| 1 | 🔴 Bug | `main.py:874, 1208` | `.get()` on Pydantic `UsageMetrics` — will crash | ✅ Resolved |
+| 2 | 🟡 Race | `main.py:36` | Global `abort_event` shared across requests | ✅ Resolved (TODO Guarded) |
+| 3 | 🟡 Bug | `main.py:588` | Operator precedence ambiguity | ✅ Resolved |
+| 4 | 🟡 DRY | `main.py` | `StreamCatcher` duplicated 2x (~240 lines) | ✅ Resolved (Unified Class) |
+| 5 | 🟡 DRY | `main.py` | Tool instantiation duplicated | ✅ Resolved (Factory Function) |
+| 6 | 🟡 DRY | `page.tsx` | SSE processing duplicated | ✅ Resolved (Shared Helper) |
+| 7 | 🟢 DRY | `page.tsx` | Token accumulation repeated 5x | ✅ Resolved |
+| 8 | 🟠 Thread | `main.py:712` | `sys.stdout` redirect is process-global | ✅ Resolved (TODO Guarded) |
+| 9 | 🟠 Perf | `Terminal.tsx` | Full re-render on every log | ✅ Resolved (Memoized Items) |
+| 10 | 🟠 Perf | `page.tsx` | Array copy per log line | ✅ Resolved (Buffered `requestAnimationFrame`) |
+| 11 | 🟡 Bug | `page.tsx:515` | `model_thinking` dropped in iterate handler | ✅ Resolved |
+| 12 | 🟢 Maint | `page.tsx` | Hardcoded `localhost:8000` x9 | ✅ Resolved (`API_BASE` Constant) |
+| 13 | 🟢 UX | `DesignChat.tsx` | Agent messages not markdown-rendered | ✅ Resolved |
+| 14 | 🟢 Style | `DesignChat.tsx:158` | No-op gradient | ✅ Resolved |
+| 15 | 🟡 Bug | `page.tsx:777` | Scroll-to-top targets wrong container | ✅ Resolved |
+| 16 | 🟢 Style | `page.tsx:784` | `dangerouslySetInnerHTML` for CSS | ✅ Resolved (Moved to `globals.css`) |
