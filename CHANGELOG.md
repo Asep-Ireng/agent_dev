@@ -4,6 +4,81 @@ All notable changes to the **AI Agent Developer** platform are documented in thi
 
 ---
 
+## [2.1.0] - 2026-05-26
+
+### Refactor — Backend Modularization (`main.py` Split)
+
+`main.py` was 1146 lines. It has been decomposed into focused, importable modules with no behavior changes.
+
+#### New Files
+
+| File | Responsibility |
+|---|---|
+| `config.py` | Global state (`runtime_settings`, `approval_settings`, `BASE_WORKSPACE_DIR`, `_active_runs`), and all Pydantic request models |
+| `helpers.py` | Pure utility functions: provider/model resolution, `validate_workspace_path`, `validate_chat_history`, `build_system_prompt`, `_emit` |
+| `agent_loop.py` | `run_agent_loop()` — the LiteLLM streaming engine; `_emit_tool_result()` — structured SSE tool result emitter |
+| `run_manager.py` | Per-request state lifecycle: `_make_run_state`, `_cleanup_run`, `_get_run` |
+| `routers/settings.py` | `GET/POST /api/settings`, `GET /api/workspace/diff` |
+| `routers/design.py` | `POST /api/design/chat` |
+| `routers/develop.py` | `POST /api/develop` (SSE) |
+| `routers/iterate.py` | `POST /api/dev-iterate` (SSE) |
+| `routers/dev_chat.py` | `POST /api/dev-chat` |
+| `routers/control.py` | `/api/develop/stop`, `/approve`, `/toggle-approval` |
+
+#### Modified Files
+- **`main.py`**: Reduced from 1146 lines to ~40 lines — now only wires routers, configures CORS, and guards `uvicorn.run`.
+- **`backend/README.md`**: Updated to reflect the new modular structure.
+
+#### No Behavior Changes
+All API routes, SSE event vocabulary, and frontend interactions are identical.
+
+---
+
+## [2.0.0] - 2026-05-26
+
+
+### Breaking Change — Backend Orchestration Rearchitected
+
+Replaced the CrewAI agent framework entirely with a native `litellm` streaming loop using OpenAI-compatible function calling.
+
+#### Why
+- `StreamCatcher` was hijacking `sys.stdout` process-wide and regex-matching `Thought: / Action: / Observation:` from CrewAI's print output. Any upstream version bump would silently break the entire Terminal UI.
+- `PatchedStream` + `_patched_completion` was a global monkeypatch on `litellm.completion` just to intercept thinking tokens — fragile by design.
+- `abort_event` and `approval_state` were process-global threading primitives with TODO comments acknowledging they'd break under concurrent use.
+- CrewAI was running three separate single-agent crews (designer, developer, iterative_developer) with `allow_delegation=False` — essentially single-turn loops with no multi-agent value.
+
+#### What Changed
+
+**`backend/dev_tools.py`**
+- Removed `crewai.tools.BaseTool` inheritance from all tools
+- Each tool is now a plain Python class with a `run()` method and `to_openai_schema()` for OpenAI function-calling format
+- Added `ToolRegistry` class: holds all tool instances, exports schemas via `get_schemas()`, dispatches calls via `execute(name, args)` with Pydantic validation
+- Added `create_dev_tool_registry()` factory (replaces the old `create_dev_tools()` list factory)
+
+**`backend/design_tools.py`**
+- Removed `BaseTool` inheritance from `UpdateSpecTool`
+- Added `to_openai_schema()` method
+
+**`backend/main.py`**
+- **Added `run_agent_loop()`**: Native litellm streaming loop that replaces `Crew.kickoff()`. Uses structured JSON tool calls, accumulates streaming chunks, emits the exact same SSE events as before (`thought`, `tool_call`, `tool_input`, `tool_result`, `model_thinking`, `final_answer`, `result`). Iteration-safe with configurable `max_iter`.
+- **Added `build_system_prompt()`**: Builds system prompts from `agents.yaml` `role`/`goal`/`backstory` fields (previously handled internally by CrewAI's Agent constructor).
+- **Added per-request `RunState`**: Each `/api/develop` and `/api/dev-iterate` call creates its own `abort` and `approval_event` threading objects, keyed by `run_id` UUID. Fixes the process-global threading race condition.
+- **Rewired `/api/design/chat`**: Now a single-turn `litellm.completion()` call with function calling — no Crew/Agent/Task construction.
+- **Rewired `/api/develop`**: Calls `run_agent_loop()` in a background thread instead of `Crew.kickoff()`.
+- **Rewired `/api/dev-iterate`**: Same treatment.
+- **Deleted `StreamCatcher`** (~100 lines) — no longer needed, tool calls are structured JSON.
+- **Deleted `PatchedStream`, `_patched_completion`, `_litellm.completion = _patched_completion`** — thinking tokens are now captured natively from stream chunks.
+- **Deleted `CustomStreamCallback(BaseCallbackHandler)`** — LangChain callback no longer needed.
+- **Deleted `_thread_local`, `_old_completion`** — artifacts of the monkeypatching approach.
+- **Removed imports**: `crewai`, `langchain_core`
+
+**`agent_workflow.py`** — Deleted (dead CrewAI demo script from early development).
+
+#### Frontend — No Changes
+The SSE event vocabulary (`thought`, `tool_call`, `tool_result`, `cmd_start`, `cmd_output`, `cmd_end`, `model_thinking`, `final_answer`, `result`, `action_required`, `done`) is unchanged. `Terminal.tsx`, `page.tsx`, and all other components are untouched.
+
+---
+
 ## [1.2.1] - 2026-05-26
 
 ### Added & Improved

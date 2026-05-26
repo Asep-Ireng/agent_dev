@@ -1,8 +1,7 @@
 import os
 import subprocess
 import threading
-from typing import Any
-from crewai.tools import BaseTool
+from typing import Any, Callable
 from pydantic import BaseModel, Field
 
 # ==================================
@@ -90,28 +89,42 @@ class ReportTaskStatusSchema(BaseModel):
 # ==================================
 
 
-class TerminalExecutionTool(BaseTool):
-    name: str = "Execute Terminal Command"
+class TerminalExecutionTool:
+    name: str = "execute_terminal_command"
     description: str = (
         "Executes a shell command in the specified workspace directory and returns the stdout and stderr.\n"
         "ENVIRONMENT: You are on Windows (cmd/PowerShell) - use Windows commands. NEVER run recursive directory listings like 'dir /s'. Use 'dir' (without /s).\n"
         "When scaffolding projects, ALWAYS use non-interactive flags (e.g. 'npx -y ...', 'npm init -y'). NEVER run interactive prompts.\n"
         "PRE-COMPLETION VERIFICATION: Test-run the application before finishing to verify it works (e.g. 'npm run dev' with a timeout), fix any errors, and kill the dev server."
     )
-    args_schema: type[BaseModel] = TerminalExecutionSchema
-    workspace_path: str = "./workspace"
-    require_approval: bool = False
-    approval_callback: Any = None
-    stream_callback: Any = None  # Called with (stream_type, line) for real-time output
+    args_schema = TerminalExecutionSchema
 
-    def __init__(self, workspace_path: str, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(
+        self,
+        workspace_path: str,
+        require_approval: bool = False,
+        approval_callback: Any = None,
+        stream_callback: Any = None,
+    ):
         self.workspace_path = workspace_path
+        self.require_approval = require_approval
+        self.approval_callback = approval_callback
+        self.stream_callback = stream_callback
 
         if not os.path.exists(self.workspace_path):
             os.makedirs(self.workspace_path, exist_ok=True)
 
-    def _run(self, command: str) -> str:
+    def to_openai_schema(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.args_schema.model_json_schema(),
+            },
+        }
+
+    def run(self, command: str) -> str:
         """Execute the command using Popen with real-time streaming"""
 
         if self.require_approval and self.approval_callback:
@@ -220,22 +233,35 @@ class TerminalExecutionTool(BaseTool):
             return f"Error executing command: {str(e)}"
 
 
-class WriteFileTool(BaseTool):
-    name: str = "Write File"
+class WriteFileTool:
+    name: str = "write_file"
     description: str = (
         "Writes content to a file in the workspace directory. Automatically creates parent directories if they don't exist.\n"
         "ALWAYS use this tool to save NEW source code. Do NOT use echo or cat to write blocks of code in the terminal."
     )
-    args_schema: type[BaseModel] = WriteFileSchema
-    workspace_path: str = "./workspace"
-    require_approval: bool = False
-    approval_callback: Any = None
+    args_schema = WriteFileSchema
 
-    def __init__(self, workspace_path: str, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(
+        self,
+        workspace_path: str,
+        require_approval: bool = False,
+        approval_callback: Any = None,
+    ):
         self.workspace_path = workspace_path
+        self.require_approval = require_approval
+        self.approval_callback = approval_callback
 
-    def _run(self, file_path: str, content: str) -> str:
+    def to_openai_schema(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.args_schema.model_json_schema(),
+            },
+        }
+
+    def run(self, file_path: str, content: str) -> str:
         if self.require_approval and self.approval_callback:
             try:
                 display_content = content[:200] + ("..." if len(content) > 200 else "")
@@ -264,20 +290,28 @@ class WriteFileTool(BaseTool):
             return f"[FAILED] Error writing file: {str(e)}"
 
 
-class ReadFileTool(BaseTool):
-    name: str = "Read File"
+class ReadFileTool:
+    name: str = "read_file"
     description: str = (
         "Reads the content of a file in the workspace. You can optionally specify a line range.\n"
         "When you need to EDIT an existing file, you MUST ALWAYS use Read File first to see the current content and exact line numbers."
     )
-    args_schema: type[BaseModel] = ReadFileSchema
-    workspace_path: str = "./workspace"
+    args_schema = ReadFileSchema
 
-    def __init__(self, workspace_path: str, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, workspace_path: str):
         self.workspace_path = workspace_path
 
-    def _run(self, file_path: str, start_line: int = 0, end_line: int = -1) -> str:
+    def to_openai_schema(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.args_schema.model_json_schema(),
+            },
+        }
+
+    def run(self, file_path: str, start_line: int = 0, end_line: int = -1) -> str:
         try:
             target_path = os.path.abspath(os.path.join(self.workspace_path, file_path))
             workspace_abs = os.path.abspath(self.workspace_path) + os.sep
@@ -309,22 +343,35 @@ class ReadFileTool(BaseTool):
             return f"[FAILED] Error reading file: {str(e)}"
 
 
-class ReplaceInFileTool(BaseTool):
-    name: str = "Replace In File"
+class ReplaceInFileTool:
+    name: str = "replace_in_file"
     description: str = (
         "Finds and replaces an exact text match in a file. Use this if you have a unique text snippet to match without rewriting the whole file.\n"
         "You MUST use the Read File tool first to see the exact content. If the old_text is not found exactly, the operation will fail."
     )
-    args_schema: type[BaseModel] = ReplaceInFileSchema
-    workspace_path: str = "./workspace"
-    require_approval: bool = False
-    approval_callback: Any = None
+    args_schema = ReplaceInFileSchema
 
-    def __init__(self, workspace_path: str, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(
+        self,
+        workspace_path: str,
+        require_approval: bool = False,
+        approval_callback: Any = None,
+    ):
         self.workspace_path = workspace_path
+        self.require_approval = require_approval
+        self.approval_callback = approval_callback
 
-    def _run(self, file_path: str, old_text: str, new_text: str) -> str:
+    def to_openai_schema(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.args_schema.model_json_schema(),
+            },
+        }
+
+    def run(self, file_path: str, old_text: str, new_text: str) -> str:
         if self.require_approval and self.approval_callback:
             try:
                 old_preview = old_text[:150] + ("..." if len(old_text) > 150 else "")
@@ -369,24 +416,35 @@ class ReplaceInFileTool(BaseTool):
             return f"[FAILED] Error editing file: {str(e)}"
 
 
-class EditFileLinesTool(BaseTool):
-    name: str = "Edit File Lines"
+class EditFileLinesTool:
+    name: str = "edit_file_lines"
     description: str = (
         "Replaces a specific range of lines in a file with new content. Use this for surgical edits.\n"
         "Never rewrite a whole file just to change a few lines. You MUST use Read File first to get the correct line numbers."
     )
-    args_schema: type[BaseModel] = EditFileLinesSchema
-    workspace_path: str = "./workspace"
-    require_approval: bool = False
-    approval_callback: Any = None
+    args_schema = EditFileLinesSchema
 
-    def __init__(self, workspace_path: str, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(
+        self,
+        workspace_path: str,
+        require_approval: bool = False,
+        approval_callback: Any = None,
+    ):
         self.workspace_path = workspace_path
+        self.require_approval = require_approval
+        self.approval_callback = approval_callback
 
-    def _run(
-        self, file_path: str, start_line: int, end_line: int, new_content: str
-    ) -> str:
+    def to_openai_schema(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.args_schema.model_json_schema(),
+            },
+        }
+
+    def run(self, file_path: str, start_line: int, end_line: int, new_content: str) -> str:
         if self.require_approval and self.approval_callback:
             try:
                 msg = f"EDIT_FILE_LINES: {file_path}\nRANGE: {start_line}-{end_line}\n\nNEW CONTENT PREVIEW:\n{new_content[:100]}..."
@@ -428,21 +486,34 @@ class EditFileLinesTool(BaseTool):
             return f"[FAILED] {str(e)}"
 
 
-class InsertAtLineTool(BaseTool):
-    name: str = "Insert At Line"
+class InsertAtLineTool:
+    name: str = "insert_at_line"
     description: str = (
         "Inserts content at a specific line number (before the existing line). Use this to add code at a specific position without affecting existing lines."
     )
-    args_schema: type[BaseModel] = InsertAtLineSchema
-    workspace_path: str = "./workspace"
-    require_approval: bool = False
-    approval_callback: Any = None
+    args_schema = InsertAtLineSchema
 
-    def __init__(self, workspace_path: str, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(
+        self,
+        workspace_path: str,
+        require_approval: bool = False,
+        approval_callback: Any = None,
+    ):
         self.workspace_path = workspace_path
+        self.require_approval = require_approval
+        self.approval_callback = approval_callback
 
-    def _run(self, file_path: str, line_number: int, content: str) -> str:
+    def to_openai_schema(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.args_schema.model_json_schema(),
+            },
+        }
+
+    def run(self, file_path: str, line_number: int, content: str) -> str:
         if self.require_approval and self.approval_callback:
             try:
                 msg = f"INSERT_AT_LINE: {file_path}\nLINE: {line_number}\n\nCONTENT PREVIEW:\n{content[:100]}..."
@@ -485,20 +556,28 @@ class InsertAtLineTool(BaseTool):
             return f"[FAILED] {str(e)}"
 
 
-class ReportTaskStatusTool(BaseTool):
-    name: str = "Report Task Status"
+class ReportTaskStatusTool:
+    name: str = "report_task_status"
     description: str = (
         "Call this tool BEFORE giving your Final Answer to report whether the task succeeded, failed, or partially completed.\n"
         "This is MANDATORY - always call this before finishing. IMPORTANT: Do this only AFTER verification."
     )
-    args_schema: type[BaseModel] = ReportTaskStatusSchema
-    result_holder: dict = {}
+    args_schema = ReportTaskStatusSchema
 
-    def __init__(self, result_holder: dict, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, result_holder: dict):
         self.result_holder = result_holder
 
-    def _run(self, status: str, summary: str) -> str:
+    def to_openai_schema(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.args_schema.model_json_schema(),
+            },
+        }
+
+    def run(self, status: str, summary: str) -> str:
         """Record the task completion status."""
         valid_statuses = ("success", "failed", "partial")
         if status not in valid_statuses:
@@ -509,3 +588,85 @@ class ReportTaskStatusTool(BaseTool):
         self.result_holder["status"] = status
         self.result_holder["summary"] = summary
         return f"[SUCCESS] Task status recorded as '{status}': {summary}"
+
+
+# ==================================
+# TOOL REGISTRY
+# ==================================
+
+
+class ToolRegistry:
+    """Maps tool names to callable tool instances, and exports OpenAI-format schemas.
+
+    Usage:
+        registry = ToolRegistry([terminal_tool, write_tool, read_tool, ...])
+        schemas = registry.get_schemas()      # pass to litellm tools=
+        result = registry.execute("write_file", {"file_path": "...", "content": "..."})
+    """
+
+    def __init__(self, tools: list):
+        self._tools = {tool.name: tool for tool in tools}
+
+    def get_schemas(self) -> list[dict]:
+        """Return list of OpenAI function-calling schemas for all registered tools."""
+        return [tool.to_openai_schema() for tool in self._tools.values()]
+
+    def get_tool(self, name: str):
+        return self._tools.get(name)
+
+    def execute(self, tool_name: str, args: dict) -> str:
+        """Dispatch a tool call by name with the given arguments dict."""
+        tool = self._tools.get(tool_name)
+        if tool is None:
+            return f"[FAILED] Unknown tool: '{tool_name}'. Available tools: {list(self._tools.keys())}"
+        try:
+            # Validate args against the Pydantic schema
+            validated = tool.args_schema(**args)
+            return tool.run(**validated.model_dump())
+        except Exception as e:
+            return f"[FAILED] Tool '{tool_name}' error: {str(e)}"
+
+
+def create_dev_tool_registry(
+    workspace_path: str,
+    require_approval: bool,
+    approval_callback: Any,
+    stream_callback: Any,
+    task_status: dict,
+) -> ToolRegistry:
+    """Factory that creates the standard dev tool registry.
+
+    Replaces the old create_dev_tools() list factory — same tools,
+    now wrapped in a ToolRegistry for schema export and name-based dispatch.
+    """
+    tools = [
+        TerminalExecutionTool(
+            workspace_path=workspace_path,
+            require_approval=require_approval,
+            approval_callback=approval_callback,
+            stream_callback=stream_callback,
+        ),
+        WriteFileTool(
+            workspace_path=workspace_path,
+            require_approval=require_approval,
+            approval_callback=approval_callback,
+        ),
+        ReadFileTool(workspace_path=workspace_path),
+        ReplaceInFileTool(
+            workspace_path=workspace_path,
+            require_approval=require_approval,
+            approval_callback=approval_callback,
+        ),
+        EditFileLinesTool(
+            workspace_path=workspace_path,
+            require_approval=require_approval,
+            approval_callback=approval_callback,
+        ),
+        InsertAtLineTool(
+            workspace_path=workspace_path,
+            require_approval=require_approval,
+            approval_callback=approval_callback,
+        ),
+        ReportTaskStatusTool(result_holder=task_status),
+    ]
+    return ToolRegistry(tools)
