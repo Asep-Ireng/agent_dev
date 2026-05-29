@@ -11,6 +11,7 @@ from typing import Callable
 import litellm
 from dev_tools import ToolRegistry
 from helpers import _emit
+from syntax_guard import reset_failure_counts
 
 
 def run_agent_loop(
@@ -33,6 +34,9 @@ def run_agent_loop(
 
     Returns: {"status": str, "summary": str, "usage": dict}
     """
+    # Reset per-run failure budget so syntax errors don't bleed across tasks.
+    reset_failure_counts()
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": task_description},
