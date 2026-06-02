@@ -4,7 +4,76 @@ All notable changes to the **AI Agent Developer** platform are documented in thi
 
 ---
 
+## [2.2.1] - 2026-05-29
+
+### Bugfix — Dev-Iterate Diff Panel Never Appearing
+
+**Root Cause 1 — Backend (`routers/iterate.py`)**: The `result` SSE event was only emitted `if result.get("summary")`. When the agent finishes without calling `report_task_status` (e.g. exits via a direct final answer), `summary` is empty and the event is never sent. The frontend's `agentResult` state stays `""`, which causes `DevChat` to return `null` entirely — hiding the whole component including the diff button.
+
+**Root Cause 2 — Frontend (`DevChat.tsx`)**: Even when `DevChat` renders, the diff panel was gated behind `workspaceDiff &&`. If `git diff --relative` returned an empty string (e.g. files were written but the workspace isn't a git repo, or changes haven't been staged), the button was silently invisible.
+
+**Fixes:**
+- **`backend/routers/iterate.py`**: Always emit a `result` event on iteration completion. If the agent provided a real summary, use it; otherwise emit a generic `"Iteration completed with status: {status}."` fallback. This guarantees `agentResult` is always set and `DevChat` always mounts.
+- **`frontend/DevChat.tsx`**:
+  - Added `iterateHasRun` local state, set to `true` when the component first mounts (i.e. after any iteration).
+  - Diff panel now shows if `workspaceDiff || iterateHasRun` — always visible after a run.
+  - When `workspaceDiff` is empty, the badge reads `"no unstaged changes"` (instead of showing nothing) and the button action becomes a **Refresh** to re-fetch the diff.
+  - When `workspaceDiff` is populated, behaviour is unchanged: badge shows `"unstaged modifications"`, button toggles expand/collapse.
+
+---
+
+## [2.2.0] - 2026-05-29
+
+
+### Feature — Devtools Safety Hardening (Option A: AST Guard + Anchored Transactions)
+
+Hardened the dev-agent's file-editing and command-execution toolset to prevent codebase corruption, unsafe shell execution, and runaway retry loops.
+
+#### New Files
+
+| File | Responsibility |
+|---|---|
+| `backend/syntax_guard.py` | Pure validation engine: `ast.parse` for `.py`, `json.loads` for `.json`, 2 MB size cap, thread-safe 3-strike failure budget per agent run |
+| `backend/tests/test_syntax_guard.py` | 56-case pytest suite covering all safety guardrails end-to-end |
+
+#### Modified Files
+
+**`backend/dev_tools.py`**
+- **Command blocklist** added to `TerminalExecutionTool.run()`: 12 regex patterns block catastrophic shell commands (`rm -rf /`, `format c:`, `shutdown`, `reboot`, `halt`, `curl|sh`, `wget|sh`, base64 PowerShell, `iex`, `mkfs`) before execution — checked prior to HITL approval
+- **Per-file thread lock registry**: module-level `_file_locks: defaultdict(threading.Lock)` ensures concurrent writes to the same path are serialised
+- **Syntax + size validation** wired into all write paths via `_validate_and_guard()` helper:
+  - `WriteFileTool` — validates before creating/overwriting the file
+  - `ReplaceInFileTool` — validates resulting content before committing the replacement
+  - `EditFileLinesTool` — reconstructs full file content in-memory, validates, then writes
+  - `InsertAtLineTool` — same reconstruct-validate-write pattern
+- **`BatchReplaceFileContentTool`** (new tool): transactional multi-chunk replacement
+  - All anchors (`target_content`) are validated for exact-one-match on the original file before any edit is applied
+  - Chunks sorted and applied **bottom-to-top** by position to eliminate line-drift offset corruption
+  - Any anchor miss, ambiguity, or post-edit syntax failure triggers a **full rollback** — file left untouched
+  - Registered in `create_dev_tool_registry()` factory alongside existing tools
+- Added `from syntax_guard import ...` import; added `from collections import defaultdict`
+
+**`backend/agent_loop.py`**
+- Imports `reset_failure_counts` from `syntax_guard`
+- Calls `reset_failure_counts()` at the start of every `run_agent_loop()` invocation so the 3-failure budget is per-task, not sticky across runs
+
+**`backend/config/agents.yaml`**
+- `developer` and `iterative_developer` backstories expanded from single-line strings to block scalars
+- Both personas now document: safety constraints (blocklist, syntax guard, size cap, failure budget) and preferred editing tool hierarchy (`batch_replace_file_content` → `replace_in_file` → `write_file`)
+- `iterative_developer` explicitly warns against using `edit_file_lines`/`insert_at_line` with stale line numbers
+
+**`backend/README.md`**
+- Directory tree updated to include `syntax_guard.py`
+- New §7 `syntax_guard.py` section added
+- `dev_tools.py` section (now §8) rewritten to document all safety-hardened tools including `BatchReplaceFileContentTool`
+
+#### No Breaking Changes
+All existing tool names, schemas, API routes, and SSE event vocabulary are unchanged. `BatchReplaceFileContentTool` is purely additive.
+
+---
+
 ## [2.1.0] - 2026-05-26
+
 
 ### Refactor — Backend Modularization (`main.py` Split)
 

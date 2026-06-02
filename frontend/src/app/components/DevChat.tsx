@@ -61,6 +61,7 @@ export default function DevChat({
 }: DevChatProps) {
   const devChatEndRef = useRef<HTMLDivElement>(null);
   const [isDiffExpanded, setIsDiffExpanded] = useState(false);
+  const [iterateHasRun, setIterateHasRun] = useState(false);
 
   useEffect(() => {
     devChatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -68,6 +69,7 @@ export default function DevChat({
 
   useEffect(() => {
     fetchWorkspaceDiff();
+    setIterateHasRun(true);
   }, []);
 
   if (!agentResult || developerLoading) return null;
@@ -289,10 +291,13 @@ export default function DevChat({
           </div>
         </div>
 
-        {workspaceDiff && (
+        {(workspaceDiff || iterateHasRun) && (
           <div className="bg-black/20 border border-white/10 rounded-2xl overflow-hidden flex flex-col mt-4">
             <button
-              onClick={() => setIsDiffExpanded(!isDiffExpanded)}
+              onClick={() => {
+                if (workspaceDiff) setIsDiffExpanded(!isDiffExpanded);
+                else fetchWorkspaceDiff();
+              }}
               className="w-full flex items-center justify-between px-4 py-3 bg-white/5 hover:bg-white/[0.08] transition-colors text-left cursor-pointer"
             >
               <div className="flex items-center gap-2">
@@ -300,12 +305,20 @@ export default function DevChat({
                 <span className="font-mono text-xs font-bold text-[#F4F4F6] uppercase tracking-wider">
                   Code Diff Review
                 </span>
-                <span className="bg-[#E51937]/10 text-[#E51937] text-[10px] px-1.5 py-0.5 rounded font-mono border border-[#E51937]/20 font-semibold">
-                  unstaged modifications
-                </span>
+                {workspaceDiff ? (
+                  <span className="bg-[#E51937]/10 text-[#E51937] text-[10px] px-1.5 py-0.5 rounded font-mono border border-[#E51937]/20 font-semibold">
+                    unstaged modifications
+                  </span>
+                ) : (
+                  <span className="bg-white/5 text-[#F4F4F6]/40 text-[10px] px-1.5 py-0.5 rounded font-mono border border-white/10">
+                    no unstaged changes
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-1.5 text-xs text-[#F4F4F6]/50">
-                {isDiffExpanded ? (
+                {!workspaceDiff ? (
+                  <span>Refresh</span>
+                ) : isDiffExpanded ? (
                   <>
                     <span>Hide Diff</span>
                     <ChevronDown className="w-4 h-4" />
@@ -320,7 +333,7 @@ export default function DevChat({
             </button>
 
             <AnimatePresence>
-              {isDiffExpanded && (
+              {isDiffExpanded && workspaceDiff && (
                 <motion.div
                   initial={{ height: 0, opacity: 0 }}
                   animate={{ height: "auto", opacity: 1 }}

@@ -669,8 +669,8 @@ export default function Home() {
         updateBackendSettings={updateBackendSettings}
       />
 
-      <main ref={mainRef} className="flex-1 overflow-y-auto p-10 relative bg-grid">
-        <div className="max-w-4xl mx-auto space-y-12 pb-32">
+      <main ref={mainRef} className="flex-1 overflow-y-auto px-8 py-8 relative bg-grid">
+        <div className="max-w-6xl mx-auto space-y-12 pb-32">
           {/* HEADER AREA */}
           <motion.div
             initial={{ y: 20, opacity: 0 }}

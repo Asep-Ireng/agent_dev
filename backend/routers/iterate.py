@@ -133,9 +133,15 @@ async def dev_iterate(req: IterateRequest):
 
             if result.get("summary"):
                 _emit(q, "result", {"text": result["summary"]})
+            else:
+                # Agent finished without calling report_task_status — still emit a result
+                # so the frontend's agentResult is set and DevChat (diff button) renders.
+                fallback = f"Iteration completed with status: {result['status']}."
+                _emit(q, "result", {"text": fallback})
 
             final_status = result["status"]
             metrics = result["usage"]
+
 
         except InterruptedError as e:
             killed = True
