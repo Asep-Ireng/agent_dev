@@ -749,7 +749,7 @@ export default function Home() {
 
           {/* Terminal + Thinking split layout */}
           <div className="flex gap-4 transition-all duration-300">
-            <div className={`transition-all duration-500 ${showThinkingPanel ? "flex-[3]" : "flex-1"} min-w-0`}>
+            <div className="flex-[3] min-w-0">
               <Terminal
                 actionLogs={actionLogs}
                 developerLoading={developerLoading}

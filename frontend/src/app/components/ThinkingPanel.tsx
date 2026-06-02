@@ -24,12 +24,11 @@ export default function ThinkingPanel({
 
   return (
     <motion.div
-      initial={{ opacity: 0, x: 24, width: 0 }}
-      animate={{ opacity: 1, x: 0, width: "auto" }}
-      exit={{ opacity: 0, x: 24, width: 0 }}
+      initial={{ opacity: 0, x: 24, flexGrow: 0, flexShrink: 1, flexBasis: "0%" }}
+      animate={{ opacity: 1, x: 0, flexGrow: 2, flexShrink: 1, flexBasis: "0%" }}
+      exit={{ opacity: 0, x: 24, flexGrow: 0, flexShrink: 1, flexBasis: "0%" }}
       transition={{ type: "spring", stiffness: 340, damping: 30 }}
-      className="flex-[2] min-w-0 flex flex-col"
-      style={{ minWidth: 0 }}
+      className="min-w-0 flex flex-col overflow-hidden"
     >
       {/* Panel mirror-header — visually aligns with terminal header below */}
       <div className="flex items-center gap-2.5 mb-4 h-[28px]">
