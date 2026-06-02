@@ -107,5 +107,23 @@ Introduce a toggle switch in the Dev Chat panel ("Use Tools") that is active in 
     *   In `DevChat.tsx`, render a small toggle switch labeled "Use Tools" next to the mode picker.
     *   Pass the toggle state in `handleDevChat` (via Form Data `enable_tools`) and in `handleApplyProceed` (via JSON body `enable_tools`).
 
+---
+
+## 8. Autonomous Image & Asset Generator Tool
+*Status: Proposed*
+
+Provide the developer agent with an image generation tool so it can autonomously generate visual assets, icons, or mock illustrations for the frontend instead of using placeholder boxes or broken local image paths.
+
+### Proposed Upgrades:
+
+1.  **`GenerateAssetTool` Schema**:
+    *   Register `generate_asset(prompt: str, filename: str = "mock_asset.png", resolution: str = "1024x1024")` in `backend/dev_tools.py`.
+2.  **API Integration (Nano Banana / Gemini Imagen API)**:
+    *   Use the Gemini API / Google AI Studio Imagen models (or a configured endpoint like `imagen-3.0-generate-002`) to request text-to-image generations using the specified prompt.
+    *   Save the resulting bytes as a file under the workspace path (e.g. `workspace/public/images/{filename}`) so it immediately links into the code cleanly.
+3.  **Sandboxing & Path Safety**:
+    *   Sanitize the target path to ensure generated files are strictly saved within the active workspace bounds.
+
+
 
 
