@@ -31,6 +31,7 @@ async def dev_chat(
     workspace_path: str = Form(BASE_WORKSPACE_DIR),
     history: str = Form("[]"),  # JSON string of [{role, content}]
     files: List[UploadFile] = File(default=[]),
+    direct_session: bool = Form(False),
 ):
     """Chat with the dev agent about the code it built, with optional image attachments."""
     set_keys_from_env()
@@ -141,17 +142,71 @@ Keep responses concise and useful. Use markdown formatting."""
             messages.append({"role": "user", "content": user_content})
 
         model_str = get_litellm_model(model, provider)
-        response = litellm.completion(model=model_str, messages=messages)
 
-        reply = response.choices[0].message.content
-        usage = getattr(response, "usage", None)
-        usage_dict = {}
-        if usage:
-            usage_dict = {
-                "prompt_tokens": getattr(usage, "prompt_tokens", 0),
-                "completion_tokens": getattr(usage, "completion_tokens", 0),
-                "total_tokens": getattr(usage, "total_tokens", 0),
+        # Setup the ReadFileTool for workspace inspection (Ask mode is read-only)
+        from dev_tools import ReadFileTool
+        import json as _json_tool
+        read_tool = ReadFileTool(workspace_path=ws)
+        
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": read_tool.description,
+                    "parameters": read_tool.args_schema.model_json_schema(),
+                }
             }
+        ]
+
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_tokens_count = 0
+        reply = "No response generated."
+
+        for _ in range(5):
+            response = litellm.completion(
+                model=model_str,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto"
+            )
+
+            # Accumulate token usage
+            usage = getattr(response, "usage", None)
+            if usage:
+                total_prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
+                total_completion_tokens += getattr(usage, "completion_tokens", 0) or 0
+                total_tokens_count += getattr(usage, "total_tokens", 0) or 0
+
+            choice = response.choices[0]
+            if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
+                # Append assistant message with tool calls to message history
+                messages.append(choice.message)
+                
+                # Execute the tool calls
+                for tool_call in choice.message.tool_calls:
+                    if tool_call.function.name == "read_file":
+                        try:
+                            args = _json_tool.loads(tool_call.function.arguments)
+                        except Exception:
+                            args = {}
+                        
+                        tool_result = read_tool.run(**args)
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": tool_result
+                        })
+            else:
+                reply = choice.message.content
+                break
+
+        usage_dict = {
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
+            "total_tokens": total_tokens_count,
+        }
         return {"reply": reply, "usage": usage_dict}
 
     except HTTPException:

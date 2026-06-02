@@ -438,6 +438,7 @@ export default function Home() {
         formData.append("spec", spec);
         formData.append("workspace_path", workspacePath);
         formData.append("history", JSON.stringify(devChatMessages));
+        formData.append("direct_session", String(isCodebaseActive));
         filesToSend.forEach((file) => formData.append("files", file));
 
         const response = await fetch(`${API_BASE}/api/dev-chat`, {
@@ -479,6 +480,7 @@ export default function Home() {
         formData.append("spec", spec);
         formData.append("workspace_path", workspacePath);
         formData.append("history", JSON.stringify(devChatMessages));
+        formData.append("direct_session", String(isCodebaseActive));
         filesToSend.forEach((file) => formData.append("files", file));
 
         const response = await fetch(`${API_BASE}/api/dev-chat`, {
@@ -648,6 +650,25 @@ export default function Home() {
     }
   };
 
+  const handleOpenExistingCodebase = () => {
+    setDevChatMode("apply");
+    setAgentResult("Connected to workspace. Direct developer session active.");
+    setDevChatMessages([
+      {
+        role: "assistant",
+        content: "👋 Connected to workspace folder. What would you like to build, change, or debug here? Make sure **Apply** mode is selected if you want me to write files.",
+      },
+    ]);
+  };
+
+  const handleCloseCodebase = () => {
+    setAgentResult("");
+    setDevChatMessages([]);
+    setWorkspaceDiff("");
+  };
+
+  const isCodebaseActive = agentResult === "Connected to workspace. Direct developer session active.";
+
   return (
     <div className="flex h-screen bg-[#0F0F11] text-[#F4F4F6]/80 font-sans selection:bg-[#E51937]/30 overflow-hidden">
       <Sidebar
@@ -667,6 +688,9 @@ export default function Home() {
         setRequireApproval={setRequireApproval}
         developerLoading={developerLoading}
         updateBackendSettings={updateBackendSettings}
+        onOpenExistingCodebase={handleOpenExistingCodebase}
+        onCloseCodebase={handleCloseCodebase}
+        isCodebaseActive={isCodebaseActive}
       />
 
       <main ref={mainRef} className="flex-1 overflow-y-auto px-8 py-8 relative bg-grid">

@@ -19,6 +19,9 @@ interface SidebarProps {
   setRequireApproval: (val: boolean) => void;
   developerLoading: boolean;
   updateBackendSettings: (provider?: string, model?: string, thinkingLevel?: string) => void;
+  onOpenExistingCodebase: () => void;
+  onCloseCodebase: () => void;
+  isCodebaseActive: boolean;
 }
 
 export default function Sidebar({
@@ -38,6 +41,9 @@ export default function Sidebar({
   setRequireApproval,
   developerLoading,
   updateBackendSettings,
+  onOpenExistingCodebase,
+  onCloseCodebase,
+  isCodebaseActive,
 }: SidebarProps) {
   return (
     <motion.aside
@@ -134,6 +140,25 @@ export default function Sidebar({
           <p className="text-[10px] text-[#71717A]/50 mt-1">
             Directory where the agent writes code.
           </p>
+          {isCodebaseActive ? (
+            <button
+              onClick={onCloseCodebase}
+              disabled={developerLoading}
+              className="w-full mt-2 py-2 bg-white/5 hover:bg-[#E51937]/25 border border-white/10 hover:border-[#E51937]/35 text-[#F4F4F6] rounded-xl text-xs font-semibold tracking-wider transition-all active:scale-95 disabled:opacity-50 disabled:pointer-events-none flex items-center justify-center gap-1.5 shadow-md shadow-[#E51937]/10 uppercase"
+              title="Close direct session and return to Lead Designer spec phase"
+            >
+              ✕ Close Codebase
+            </button>
+          ) : (
+            <button
+              onClick={onOpenExistingCodebase}
+              disabled={developerLoading}
+              className="w-full mt-2 py-2 bg-white/5 hover:bg-[#E51937]/25 border border-white/10 hover:border-[#E51937]/35 text-[#F4F4F6] rounded-xl text-xs font-semibold tracking-wider transition-all active:scale-95 disabled:opacity-50 disabled:pointer-events-none flex items-center justify-center gap-1.5 shadow-md shadow-black/10 uppercase"
+              title="Bypass design planning and talk directly to Developer"
+            >
+              📂 Open Codebase
+            </button>
+          )}
         </div>
 
         <div className="space-y-2 pt-2 border-t border-[#F4F4F6]/5">
