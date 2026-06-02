@@ -4,6 +4,19 @@ All notable changes to the **AI Agent Developer** platform are documented in thi
 
 ---
 
+## [2.2.2] - 2026-06-02
+
+### Added — Setup Batch Script and Backend Requirements
+
+Added setup scripts to streamline onboarding when freshly cloned from git.
+
+#### New Files
+
+- **[requirements.txt](file:///r:/Kuliah/Kuliah%20Rui/Project%20Gabut/agent_dev/backend/requirements.txt)**: Lists pinned Python dependencies (`fastapi`, `uvicorn`, `pydantic`, `python-dotenv`, `litellm`, `PyYAML`, `pytest`).
+- **[setup.bat](file:///r:/Kuliah/Kuliah%20Rui/Project%20Gabut/agent_dev/setup.bat)**: An automated Windows setup script that copies `.env.example` to `.env` (if not present), installs backend Python packages, and runs `npm install` inside both the `frontend` and `backend` directories.
+
+---
+
 ## [2.2.1] - 2026-05-29
 
 ### Bugfix — Dev-Iterate Diff Panel Never Appearing
