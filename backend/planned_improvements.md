@@ -21,18 +21,49 @@ Give the developer agent the ability to query the web for API documentation, lib
 
 ---
 
-## 3. Headless Browser Verification
+## 3. Headless Browser Verification (Two-Tier)
 *Status: Proposed*
 
-Provide the agent with visual capabilities to verify client-side layouts and catch browser-level exceptions.
+Provide the agent with visual capabilities to verify client-side layouts and catch browser-level exceptions. Uses a **two-tier** architecture — lightweight checks via **Alumnium** and deep agentic verification via **Browser Use**.
 
-### Proposed Upgrades:
+### Tier 1: Basic Checks — Alumnium (`pip install alumnium`)
+
+Alumnium is an AI-native wrapper over Selenium/Playwright that translates natural-language instructions into browser actions via `al.do()`, `al.check()`, and `al.get()`. Fast, low-overhead, ideal for deterministic checks the agent runs after every build.
+
 1.  **📸 `take_browser_screenshot(url, output_filename)`**:
-    *   Uses headless Playwright/Puppeteer to load local servers (e.g. `localhost:8080`) and capture high-resolution images of viewports, allowing the agent to inspect the visual rendering of its work.
+    *   Spins up a headless Playwright driver via Alumnium, loads `localhost` URLs, captures high-resolution viewport screenshots.
+    *   Returns the image as base64 for the next LLM turn (if the model supports vision), or saves to workspace.
 2.  **📋 `harvest_browser_logs(url, wait_seconds)`**:
-    *   Opens a page for 3 seconds and collects console errors (`console.error`, uncaught Javascript Exceptions, and resource 404s), feeding them back to the agent so it can self-repair broken client-side imports.
-3.  **Connection Warmup**:
-    *   Ensure the tool pings the local port first to wait for the local development server (like `npm run dev`) to fully boot before opening the browser.
+    *   Opens a page for a configurable duration and collects `console.error`, uncaught JS exceptions, and resource 404s.
+    *   Feeds structured error lists back to the agent so it can self-repair broken imports or runtime crashes.
+3.  **✅ `check_page_element(url, assertion)`**:
+    *   Uses `al.check("...")` to verify natural-language assertions about the page state (e.g. `"page title contains Dashboard"`, `"login button is visible"`).
+    *   Returns pass/fail + page context on failure.
+
+### Tier 2: Detailed Verification — Browser Use (`pip install browser-use`)
+
+Browser Use is a full agentic browser automation framework — it gives the LLM direct control of a Playwright browser to perform complex multi-step UI verification flows autonomously.
+
+1.  **🔍 `deep_browser_verify(url, task_description)`**:
+    *   Spawns a Browser Use `Agent` with a verification task (e.g. `"Navigate to /dashboard, click 'Add Item', fill in the form, submit, and verify the item appears in the list"`).
+    *   The agent reasons about the page DOM/visual state and executes clicks, typing, navigation, and assertions autonomously.
+    *   Returns a structured verification report: steps taken, screenshots at key points, pass/fail status, and any errors encountered.
+2.  **🎨 `visual_regression_check(url, reference_screenshot)`**:
+    *   Uses Browser Use to load the page, capture the current state, and compare against a reference screenshot.
+    *   Reports visual differences with annotated regions and confidence scores.
+3.  **🐛 `interactive_debug_session(url, bug_description)`**:
+    *   Gives the agent a browser instance to freely explore and reproduce a reported bug.
+    *   Returns reproduction steps, console errors, network failures, and suggested fixes.
+
+### Shared Infrastructure:
+
+1.  **Connection Warmup**:
+    *   Both tiers ping the local port first (max 30s timeout with health-check polling) to wait for the dev server (`npm run dev`, `python -m http.server`, etc.) to fully boot before opening the browser.
+2.  **Origin Restriction**:
+    *   All browser tools are restricted to `localhost` / `127.0.0.1` origins by default to prevent the agent from browsing arbitrary external URLs.
+3.  **Optional Dependencies**:
+    *   Both `alumnium` and `browser-use` are optional installs — not hard requirements. Add as extras group: `pip install .[browser]`.
+    *   Playwright browser binaries (~200MB) installed on first use via `playwright install chromium`.
 
 ---
 
