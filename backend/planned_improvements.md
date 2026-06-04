@@ -155,6 +155,57 @@ Provide the developer agent with an image generation tool so it can autonomously
 3.  **Sandboxing & Path Safety**:
     *   Sanitize the target path to ensure generated files are strictly saved within the active workspace bounds.
 
+---
 
+## 9. Document Export Toolkit (PDF / Word / Excel)
+*Status: Proposed*
 
+Give the design agent (and optionally the dev agent) tools to export specs, reports, and structured data into professional document formats — PDF, Word (.docx), and Excel (.xlsx) — using Python libraries.
 
+### Proposed Tools:
+
+1.  **📄 `export_html_to_pdf(html_content, filename, css)`**:
+    *   Renders HTML + CSS to a polished PDF using **WeasyPrint** (`pip install weasyprint`) or **pdfkit** (wkhtmltopdf wrapper).
+    *   WeasyPrint is preferred (pure Python, no external binary dependency) — pdfkit as fallback if wkhtmltopdf is already installed.
+    *   Supports Jinja2 templating: the agent can compose an HTML template string with dynamic data, then export.
+    *   Output saved to workspace (e.g. `workspace/exports/{filename}.pdf`).
+
+2.  **📝 `export_to_docx(title, sections, filename)`**:
+    *   Uses **python-docx** (`pip install python-docx`) to build structured Word documents.
+    *   `sections` parameter accepts a list of typed blocks:
+        ```json
+        [
+          {"type": "heading", "level": 1, "text": "Architecture Spec"},
+          {"type": "paragraph", "text": "This system uses..."},
+          {"type": "table", "headers": ["Component", "Role"], "rows": [["API", "Backend"], ["UI", "Frontend"]]},
+          {"type": "image", "path": "diagram.png", "width_inches": 5}
+        ]
+        ```
+    *   Applies a clean default style (Calibri, proper heading hierarchy, table borders) — the agent doesn't need to micromanage formatting.
+
+3.  **📊 `export_to_xlsx(sheets, filename)`**:
+    *   Uses **openpyxl** (`pip install openpyxl`) to build multi-sheet Excel workbooks.
+    *   `sheets` parameter accepts a list of sheet definitions:
+        ```json
+        [
+          {
+            "name": "API Endpoints",
+            "headers": ["Route", "Method", "Description"],
+            "rows": [["/api/develop", "POST", "Main build SSE stream"]],
+            "auto_filter": true,
+            "column_widths": [30, 10, 50]
+          }
+        ]
+        ```
+    *   Applies auto-sizing, header styling (bold + fill), and optional auto-filter for data tables.
+
+4.  **📑 `export_markdown_to_pdf(markdown_content, filename)`**:
+    *   Convenience wrapper: converts Markdown → HTML (via `markdown` or `markdown-it-py`) → PDF (via WeasyPrint).
+    *   Useful for directly exporting the design spec or agent reports without the agent needing to write HTML.
+
+### Integration Points:
+
+*   **Design Agent**: Register tools in `design_tools.py` or a new `export_tools.py` module. The design agent can export the finalized spec to PDF/DOCX after the user approves it.
+*   **Dev Agent**: Optionally available via `create_dev_tool_registry()` for agents that need to generate reports, data exports, or documentation as part of a build task.
+*   **Dependencies**: All libraries (`weasyprint`, `python-docx`, `openpyxl`, `markdown`) added as optional extras: `pip install .[export]`.
+*   **Path Safety**: All exports sandboxed to workspace bounds via `validate_workspace_path()`.
