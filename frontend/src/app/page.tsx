@@ -17,9 +17,9 @@ import ThinkingPanel from "./components/ThinkingPanel";
 
 export default function Home() {
   const [provider, setProvider] = useState("Google (Gemini)");
-  const [model, setModel] = useState("gemini-2.5-flash");
-  const [googleModel, setGoogleModel] = useState("gemini-2.5-flash");
-  const [openaiModel, setOpenaiModel] = useState("gpt-4o");
+  const [model, setModel] = useState("gemini-3.5-flash");
+  const [googleModel, setGoogleModel] = useState("gemini-3.5-flash");
+  const [openaiModel, setOpenaiModel] = useState("gpt-5.5");
   const [thinkingLevel, setThinkingLevel] = useState("none");
 
   const [workspacePath, setWorkspacePath] = useState("./workspace");
@@ -76,7 +76,7 @@ export default function Home() {
       prevLoadingRef.current = false;
     }
     prevLoadingRef.current = developerLoading;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [developerLoading, thinkingText]);
 
   // Buffered log accumulation to avoid per-line array copies during heavy SSE output

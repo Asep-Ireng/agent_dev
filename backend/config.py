@@ -25,8 +25,8 @@ approval_settings = {"require": False}
 # Runtime settings (loaded from .env, modifiable via API)
 runtime_settings = {
     "provider": os.getenv("DEFAULT_PROVIDER", "Google (Gemini)"),
-    "google_model": os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"),
-    "openai_model": os.getenv("OPENAI_MODEL", "gpt-4o"),
+    "google_model": os.getenv("GOOGLE_MODEL", "gemini-3.5-flash"),
+    "openai_model": os.getenv("OPENAI_MODEL", "gpt-5.5"),
     "thinking_level": os.getenv("THINKING_LEVEL", "none"),
 }
 
