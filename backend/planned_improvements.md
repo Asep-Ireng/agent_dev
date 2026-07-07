@@ -209,3 +209,29 @@ Give the design agent (and optionally the dev agent) tools to export specs, repo
 *   **Dev Agent**: Optionally available via `create_dev_tool_registry()` for agents that need to generate reports, data exports, or documentation as part of a build task.
 *   **Dependencies**: All libraries (`weasyprint`, `python-docx`, `openpyxl`, `markdown`) added as optional extras: `pip install .[export]`.
 *   **Path Safety**: All exports sandboxed to workspace bounds via `validate_workspace_path()`.
+
+---
+
+## 10. Interactive Monaco Code Editor & Live Preview Panel
+*Status: Proposed*
+
+Provide a side-by-side workspace exploration panel in the frontend cockpit, allowing users to inspect files and click code references in logs to view a formatted preview.
+
+### Proposed Upgrades:
+
+1.  **Monaco Editor Integration (`@monaco-editor/react`)**:
+    *   Install `@monaco-editor/react` in the Next.js frontend.
+    *   **Phase 1 (Read-Only Viewer)**: Initialize the editor with `options={{ readOnly: true, domReadOnly: true }}`. This serves as a lightweight, safe code viewer with built-in search (`Ctrl+F`), code-folding, and minimap functionality without requiring client-side Prettier bloat.
+    *   **Phase 2 (Optional Hotfix Mode)**: Add a toggle to unlock the editor (`readOnly: false`) alongside a Save action for fast manual typo corrections.
+2.  **Clickable File References in Logs**:
+    *   Implement regex parsing in terminal outputs and chat bubbles to identify workspace filenames (e.g. `src/app/page.tsx`, `backend/main.py`).
+    *   Convert filenames into clickable action links that dynamically switch the sidebar tab and load that file into Monaco.
+3.  **Backend Workspace File API**:
+    *   Expose `GET /api/workspace/file?path={relative_path}` to retrieve raw file contents safely.
+    *   Expose `POST /api/workspace/file` with `{path, content}` (required only for Phase 2 hotfix capability) to write manual edits back to the workspace after routing through `syntax_guard.py`.
+4.  **Integrated Workspace Layout**:
+    *   Expand `SpecViewer.tsx` into a general-purpose `WorkspaceViewer` containing tabbed sections:
+        *   **`[ Architecture Spec ]`**: The current rendered design spec.
+        *   **`[ Code Viewer ]`**: The Monaco code rendering component.
+        *   **`[ Diffs ]`**: Live side-by-side diff review panel.
+

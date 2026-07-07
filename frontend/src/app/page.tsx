@@ -87,9 +87,14 @@ export default function Home() {
     logBufferRef.current.push(entry);
     if (!flushTimerRef.current) {
       flushTimerRef.current = requestAnimationFrame(() => {
+        // Snapshot the current buffer synchronously to prevent state loss
+        const itemsToFlush = [...logBufferRef.current];
+        logBufferRef.current = [];
+        flushTimerRef.current = null;
+
         setActionLogs((prev) => {
           const newLogs = [...prev];
-          for (const item of logBufferRef.current) {
+          for (const item of itemsToFlush) {
             const lastLog = newLogs[newLogs.length - 1];
             if (
               lastLog &&
@@ -106,8 +111,6 @@ export default function Home() {
           }
           return newLogs;
         });
-        logBufferRef.current = [];
-        flushTimerRef.current = null;
       });
     }
   }, []);

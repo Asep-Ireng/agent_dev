@@ -4,8 +4,12 @@ config.py — Global state, runtime configuration, and Pydantic request models.
 
 import os
 import threading
+import warnings
 from pydantic import BaseModel
 from dotenv import load_dotenv
+
+# Suppress benign Pydantic serialization warnings caused by LiteLLM's internal representation mapping
+warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValue.*")
 
 # Load environment variables from root .env (single source of truth)
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))

@@ -164,7 +164,7 @@ Keep responses concise and useful. Use markdown formatting."""
         total_tokens_count = 0
         reply = "No response generated."
 
-        for _ in range(5):
+        for _ in range(10):
             response = litellm.completion(
                 model=model_str,
                 messages=messages,
@@ -201,6 +201,28 @@ Keep responses concise and useful. Use markdown formatting."""
             else:
                 reply = choice.message.content
                 break
+
+        # Fallback: if we hit the iteration limit while calling tools, force a final text-only response
+        if reply == "No response generated.":
+            messages.append({
+                "role": "user",
+                "content": "You have reached the tool call limit. Based on the files you have read so far, please provide your final answer to the user's question."
+            })
+            try:
+                response = litellm.completion(
+                    model=model_str,
+                    messages=messages
+                )
+                # Accumulate final token usage
+                usage = getattr(response, "usage", None)
+                if usage:
+                    total_prompt_tokens += getattr(usage, "prompt_tokens", 0) or 0
+                    total_completion_tokens += getattr(usage, "completion_tokens", 0) or 0
+                    total_tokens_count += getattr(usage, "total_tokens", 0) or 0
+                
+                reply = response.choices[0].message.content or "No response generated."
+            except Exception as e:
+                reply = f"Error generating final response: {str(e)}"
 
         usage_dict = {
             "prompt_tokens": total_prompt_tokens,

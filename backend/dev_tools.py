@@ -318,19 +318,74 @@ class TerminalExecutionTool:
             stdout_thread.start()
             stderr_thread.start()
 
-            try:
-                proc.wait(timeout=300)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
+            import time
+            import platform
+
+            def kill_process_tree(pid: int):
+                if platform.system() == "Windows":
+                    try:
+                        subprocess.run(
+                            f"taskkill /F /T /PID {pid}",
+                            shell=True,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        import os
+                        import signal
+                        os.killpg(os.getpgid(pid), signal.SIGKILL)
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+
+            from run_manager import _get_run
+            active_run = _get_run(None)
+            abort_event = active_run["abort"] if active_run else None
+
+            start_time = time.time()
+            timeout = 300.0
+            aborted = False
+            timed_out = False
+
+            while True:
+                if proc.poll() is not None:
+                    break
+
+                if abort_event and abort_event.is_set():
+                    aborted = True
+                    kill_process_tree(proc.pid)
+                    proc.wait()
+                    break
+
+                if time.time() - start_time > timeout:
+                    timed_out = True
+                    kill_process_tree(proc.pid)
+                    proc.wait()
+                    break
+
+                time.sleep(0.1)
+
+            stdout_thread.join(timeout=5)
+            stderr_thread.join(timeout=5)
+
+            if aborted:
+                if self.stream_callback:
+                    self.stream_callback(
+                        "stderr", "[ABORTED] Command execution aborted by user."
+                    )
+                return "Command execution aborted by user."
+
+            if timed_out:
                 if self.stream_callback:
                     self.stream_callback(
                         "stderr", "[TIMEOUT] Command killed after 300 seconds."
                     )
                 return "Command execution timed out after 300 seconds."
-
-            stdout_thread.join(timeout=5)
-            stderr_thread.join(timeout=5)
 
             returncode = proc.returncode
             stdout_text = "".join(stdout_lines)

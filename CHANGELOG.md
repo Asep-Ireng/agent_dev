@@ -4,6 +4,22 @@ All notable changes to the **AI Agent Developer** platform are documented in thi
 
 ---
 
+## [2.2.3] - 2026-06-24
+
+### Bugfix — Terminal UI Skips Steps/Logs Due to React State Batched Updates
+
+**Root Cause**: In `frontend/src/app/page.tsx`, the `addLog` function accumulated SSE log entries in `logBufferRef.current` and flushed them using `requestAnimationFrame`. Inside the animation callback, it cleared the buffer (`logBufferRef.current = []`) synchronously and immediately scheduled the React state update `setActionLogs((prev) => { ... loop logBufferRef.current ... })`. Because React state updates are asynchronous and batched, the state updater function ran *after* the buffer had already been cleared synchronously. Consequently, it read an empty array and skipped applying the accumulated logs, resulting in UI step jumps (e.g., skipping from step 11 straight to step 32).
+
+**Fix**: Updated the `addLog` function to copy the current buffer synchronously into a local array (`const itemsToFlush = [...logBufferRef.current]`) inside the animation callback before clearing the buffer reference. The state updater now safely processes the captured copy of the logs, ensuring all streamed terminal log entries are sequentially rendered without gaps.
+
+### Bugfix — Windows Process Tree Orphanage & Stop Button Thread Blocking
+
+**Root Cause**: In `backend/dev_tools.py`, `TerminalExecutionTool.run()` executed shell commands synchronously using a blocking `proc.wait(timeout=300)`. This completely blocked the main backend thread and ignored UI stop signals (`abort_event`) for up to 5 minutes. Additionally, when a timeout occurred, calling standard `proc.kill()` on Windows only killed the parent shell process (`cmd.exe`), leaving the spawned child processes (like `node.exe` or `npm.exe`) orphaned and running in the background, keeping Port 3000 locked.
+
+**Fix**: Replaced the blocking wait with a responsive polling loop that queries `proc.poll()` and checks the run's `abort_event` dynamically every 100ms. If aborted or timed out, a platform-specific `kill_process_tree` helper is called. On Windows, this executes `taskkill /F /T /PID {pid}` to forcibly clean up the process tree (including all child Node processes) before returning control.
+
+---
+
 ## [2.2.2] - 2026-06-02
 
 ### Added — Setup Batch Script and Backend Requirements
